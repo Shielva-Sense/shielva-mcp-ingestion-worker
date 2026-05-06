@@ -476,7 +476,7 @@ def find_free_port(start_port: int, max_retries: int = 100) -> int:
 def main():
     """Run the ingestion worker"""
     import os
-    target_port = int(os.getenv("PORT", 8007))
+    target_port = int(os.getenv("INGESTION_PORT", 8007))
     
     try:
         port = find_free_port(target_port)
