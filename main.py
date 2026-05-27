@@ -2,6 +2,15 @@
 Ingestion Worker - FastAPI Service
 Handles document ingestion jobs from connectors.
 """
+# ── Envelope decryption (must run BEFORE any settings/env-reading imports) ──
+import os as _envelope_os
+_envelope_os.environ.setdefault("VAULT_SIDECAR_URL", "https://localhost:8054")
+from dotenv import load_dotenv as _envelope_load_dotenv
+_envelope_load_dotenv(".env", override=True)   # ciphertext + REDIS_URL passthrough
+from shielva_common.envelope import bootstrap as _envelope_bootstrap
+_envelope_bootstrap()
+# ──────────────────────────────────────────────────────────────────────────
+
 from fastapi import FastAPI, HTTPException, Request, Depends, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
