@@ -15,6 +15,31 @@ from .fetcher import DocumentFetcher
 from .parser import BaseParser, PARSERS, TextParser
 from .chunker import Chunker
 from .indexer import VectorIndexer, IndexerConfig
+import re
+
+# ── Ingest guardrails ───────────────────────────────────────────────────────
+_PII_PATTERNS = [
+    (re.compile(r"[\w.+-]+@[\w-]+\.[\w.-]+"), "[REDACTED_EMAIL]"),
+    (re.compile(r"\b(?:\+?\d{1,3}[\s.-]?)?(?:\(?\d{3}\)?[\s.-]?)\d{3}[\s.-]?\d{4}\b"), "[REDACTED_PHONE]"),
+    (re.compile(r"\b\d{3}-\d{2}-\d{4}\b"), "[REDACTED_SSN]"),
+    (re.compile(r"\b(?:\d[ -]?){13,16}\b"), "[REDACTED_CARD]"),
+]
+
+
+def apply_guardrails(text: str, guardrails: Dict[str, Any]) -> str:
+    """Apply a KB's ingest guardrails to a document's text BEFORE chunking:
+    redact PII and drop lines containing excluded keywords. Runs on every ingest
+    (file / url / db / api) so the policy persists across re-syncs."""
+    if not text or not guardrails:
+        return text
+    if guardrails.get("redact_pii"):
+        for pattern, repl in _PII_PATTERNS:
+            text = pattern.sub(repl, text)
+    keywords = [str(k).strip().lower() for k in (guardrails.get("exclude_keywords") or []) if str(k).strip()]
+    if keywords:
+        kept = [line for line in text.split("\n") if not any(k in line.lower() for k in keywords)]
+        text = "\n".join(kept)
+    return text
 
 logger = structlog.get_logger(__name__)
 
@@ -83,14 +108,22 @@ class IngestionPipeline:
                 if fetch_result.content:
                     document.content = await self._parse_fetched_content(fetch_result, document)
             
-            # Step 1: Parse if needed
-            if document.doc_type != DocumentType.TEXT:
-                parser = PARSERS.get(document.doc_type, TextParser())
-                document.content = await parser.parse(document.content)
+            # Step 1: Parse. Run for EVERY doc type (incl. TEXT) so that binary
+            # uploads (PDF/DOCX/XLSX/PPTX) arriving as raw bytes are decoded by
+            # their parser, and text formats arriving as bytes are decoded too.
+            # TextParser is a no-op for str content, so the JSON-text path is safe.
+            parser = PARSERS.get(document.doc_type, TextParser())
+            document.content = await parser.parse(document.content)
             
             # Step 1.5: Clean
             document.content = TextCleaner.clean(document.content)
-            
+
+            # Step 1.6: Guardrails — redact PII / drop excluded lines BEFORE
+            # chunking. Carried on the document's metadata by the ingest endpoint.
+            _gr = (document.metadata or {}).pop("_guardrails", None)
+            if _gr:
+                document.content = apply_guardrails(document.content, _gr)
+
             # Step 2: Chunk
             print(f"DEBUG: Chunking document {document.id}...")
             chunks = self.chunker.chunk(document)

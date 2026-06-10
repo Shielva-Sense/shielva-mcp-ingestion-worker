@@ -176,7 +176,19 @@ class VectorIndexer:
                 kb_id=kb_id,
                 documents=documents
             )
-            
+
+            # Ensure the FTS + HNSW indexes exist on this collection. upsert only
+            # get_or_create's the table (no ANN index), so without this the vector
+            # column has no HNSW index and queries do O(n) exact scans. IF NOT
+            # EXISTS makes this idempotent + cheap to call each batch. Best-effort —
+            # never fail ingestion if index creation hiccups.
+            try:
+                create_idx = getattr(self.vector_store, "create_text_index", None)
+                if create_idx:
+                    await create_idx(tenant_id, kb_id)
+            except Exception as _ie:
+                logger.warning("index_ensure_failed", error=str(_ie))
+
             for chunk in chunks:
                 results.append(IndexedChunk(
                     id=chunk["id"],

@@ -107,20 +107,30 @@ class EmbeddingClient:
             import google.generativeai as genai
             
             genai.configure(api_key=self.config.api_key)
-            
-            # Gemini batch embedding
-            # "models/text-embedding-004"
-            result = genai.embed_content(
-                model=self.config.model,
-                content=texts,
-                task_type="retrieval_document"
-            )
-            
+
+            # Pin the output dimension so Gemini returns vectors that match the
+            # pgvector column size (e.g. 768). Without output_dimensionality the
+            # model returns its native dim (gemini-embedding-001 = 3072), which
+            # would mismatch the collection.
+            kwargs = {
+                "model": self.config.model,
+                "content": texts,
+                "task_type": "retrieval_document",
+            }
+            if self.config.dimension:
+                kwargs["output_dimensionality"] = int(self.config.dimension)
+
+            result = genai.embed_content(**kwargs)
+
             return result['embedding']
-            
+
         except Exception as e:
+            # FAIL FAST. Never silently fall back to random mock vectors — that
+            # would poison the index with garbage that looks valid (correct dim,
+            # meaningless values) and corrupt every future retrieval. The
+            # pipeline catches this per-document and records it as a failure.
             logger.error("Gemini embedding failed", error=str(e))
-            return self._embed_mock(texts)
+            raise
 
     async def _embed_cohere(self, texts: List[str]) -> List[List[float]]:
         """Generate embeddings using Cohere."""

@@ -238,16 +238,113 @@ class SupabaseVectorStore:
         try:
             from sqlalchemy import text
             with self._client.Session() as sess:
-                sql = text(f"""
-                    CREATE INDEX IF NOT EXISTS idx_{collection_name}_content_fts 
-                    ON vecs."{collection_name}" 
+                sess.execute(text(f"""
+                    CREATE INDEX IF NOT EXISTS idx_{collection_name}_content_fts
+                    ON vecs."{collection_name}"
                     USING GIN (to_tsvector('english', metadata->>'content'));
-                """)
-                sess.execute(sql)
+                """))
+                # ANN index on the embedding column so vector search is sub-linear
+                # (HNSW, cosine). Without it pgvector does an O(n) exact scan — the
+                # query-latency cliff as the KB grows. vecs stores the vector in the
+                # `vec` column. IF NOT EXISTS keeps this idempotent.
+                sess.execute(text(f"""
+                    CREATE INDEX IF NOT EXISTS idx_{collection_name}_vec_hnsw
+                    ON vecs."{collection_name}"
+                    USING hnsw (vec vector_cosine_ops)
+                    WITH (m = 16, ef_construction = 64);
+                """))
                 sess.commit()
-                logger.info("Created FTS index", collection=collection_name)
+                logger.info("Created FTS + HNSW indexes", collection=collection_name)
         except Exception as e:
-            logger.error("Failed to create FTS index", error=str(e))
+            logger.error("Failed to create indexes", error=str(e))
+
+    async def list_documents(self, tenant_id: str, kb_id: str) -> List[Dict[str, Any]]:
+        """List distinct documents (id, title, chunk count) in a KB's collection.
+
+        Drives the "Files in this KB" UI so individual files can be removed. Returns
+        an empty list if the collection doesn't exist yet (no files ingested).
+        """
+        from sqlalchemy import text
+        collection_name = self._get_collection_name(tenant_id, kb_id)
+        documents: List[Dict[str, Any]] = []
+        try:
+            with self._client.Session() as sess:
+                sql = text(f"""
+                    SELECT metadata->>'document_id' AS document_id,
+                           COALESCE(NULLIF(MAX(metadata->>'title'), ''), NULLIF(MAX(metadata->>'filename'), '')) AS title,
+                           COUNT(*)                  AS chunks
+                    FROM vecs."{collection_name}"
+                    WHERE COALESCE(metadata->>'document_id', '') <> ''
+                    GROUP BY metadata->>'document_id'
+                    ORDER BY 2;
+                """)
+                for row in sess.execute(sql):
+                    doc_id = row[0]
+                    title = (row[1] or "").strip() or doc_id
+                    documents.append({"document_id": doc_id, "title": title, "chunks": int(row[2])})
+        except Exception as e:
+            logger.warning("list_documents failed (collection may not exist)", collection=collection_name, error=str(e))
+        return documents
+
+    async def list_chunks(self, tenant_id: str, kb_id: str, document_id: str = None, limit: int = 500) -> List[Dict[str, Any]]:
+        """List individual chunks (id, text, source doc, order) in a KB — for content curation."""
+        from sqlalchemy import text
+        collection_name = self._get_collection_name(tenant_id, kb_id)
+        out: List[Dict[str, Any]] = []
+        try:
+            with self._client.Session() as sess:
+                where = "WHERE metadata->>'document_id' = :doc" if document_id else ""
+                params: Dict[str, Any] = {"lim": limit}
+                if document_id:
+                    params["doc"] = document_id
+                sql = text(f"""
+                    SELECT id,
+                           metadata->>'content'     AS content,
+                           metadata->>'document_id' AS document_id,
+                           metadata->>'title'       AS title,
+                           COALESCE((metadata->>'chunk_index')::int, 0) AS chunk_index
+                    FROM vecs."{collection_name}"
+                    {where}
+                    ORDER BY metadata->>'document_id', COALESCE((metadata->>'chunk_index')::int, 0)
+                    LIMIT :lim
+                """)
+                for row in sess.execute(sql, params):
+                    out.append({"id": row[0], "content": row[1] or "", "document_id": row[2], "title": row[3], "chunk_index": row[4]})
+        except Exception as e:
+            logger.warning("list_chunks failed", collection=collection_name, error=str(e))
+        return out
+
+    async def delete_chunk(self, tenant_id: str, kb_id: str, chunk_id: str) -> int:
+        """Delete a single chunk (fragment) by its row id."""
+        from sqlalchemy import text
+        collection_name = self._get_collection_name(tenant_id, kb_id)
+        try:
+            with self._client.Session() as sess:
+                res = sess.execute(text(f'DELETE FROM vecs."{collection_name}" WHERE id = :id'), {"id": chunk_id})
+                sess.commit()
+                return res.rowcount or 0
+        except Exception as e:
+            logger.error("delete_chunk failed", collection=collection_name, error=str(e))
+            return 0
+
+    async def update_chunk(self, tenant_id: str, kb_id: str, chunk_id: str, content: str, embedding: List[float]) -> bool:
+        """Replace a chunk's text AND its embedding (re-embed) so retrieval stays consistent."""
+        from sqlalchemy import text
+        collection_name = self._get_collection_name(tenant_id, kb_id)
+        vec_literal = "[" + ",".join(repr(float(x)) for x in embedding) + "]"
+        try:
+            with self._client.Session() as sess:
+                res = sess.execute(text(f"""
+                    UPDATE vecs."{collection_name}"
+                    SET vec = CAST(:vec AS vector),
+                        metadata = jsonb_set(metadata, '{{content}}', to_jsonb(CAST(:content AS text)))
+                    WHERE id = :id
+                """), {"vec": vec_literal, "content": content, "id": chunk_id})
+                sess.commit()
+                return (res.rowcount or 0) > 0
+        except Exception as e:
+            logger.error("update_chunk failed", collection=collection_name, error=str(e))
+            return False
 
     async def keyword_search(
         self,
@@ -350,11 +447,22 @@ class SupabaseVectorStore:
         kb_id: str,
         filter: Dict[str, Any]
     ) -> int:
-        """Delete documents by metadata filter."""
+        """Delete chunks by metadata equality filter. Returns the rows deleted.
+
+        Uses raw SQL on the vecs collection table — vecs' own ``collection.delete``
+        needs operator-form filters (``{"k": {"$eq": v}}``) and returns no count, so
+        a plain ``{"k": v}`` filter silently deleted nothing.
+        """
+        from sqlalchemy import text
         collection_name = self._get_collection_name(tenant_id, kb_id)
-        collection = self._client.get_collection(name=collection_name)
-        
-        # vecs delete supports filters
-        # collection.delete(filters=...)
-        collection.delete(filters=filter)
-        return 0 # vecs doesn't return count?
+        # Keys are internal (e.g. "document_id"), never user input; values are bound.
+        conds = " AND ".join(f"metadata->>'{k}' = :v{i}" for i, k in enumerate(filter.keys()))
+        params = {f"v{i}": str(v) for i, v in enumerate(filter.values())}
+        try:
+            with self._client.Session() as sess:
+                res = sess.execute(text(f'DELETE FROM vecs."{collection_name}" WHERE {conds}'), params)
+                sess.commit()
+                return res.rowcount or 0
+        except Exception as e:
+            logger.error("delete_by_filter failed", collection=collection_name, error=str(e))
+            return 0
