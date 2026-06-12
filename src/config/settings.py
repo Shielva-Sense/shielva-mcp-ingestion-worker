@@ -3,12 +3,30 @@
 Embedding API keys + Supabase URI carry secrets — must come from envelope
 decryption, file-mount, or kwargs. No plaintext defaults.
 """
+import os
 from functools import lru_cache
 from typing import List, Optional
 
 from pydantic import Field, SecretStr
 
 from shielva_common.config.sealed import SealedSettings, sealed_field
+
+
+def _default_ingest_concurrency() -> int:
+    """INITIAL concurrency target. The pool is elastic (see queue.py) — it floats
+    between ``ingest_min_concurrency`` and ``ingest_max_concurrency`` based on live
+    system load, so this is only the starting point, not a hard cap. Start modest
+    (~cpu/2) and let the controller scale up if there's backlog + CPU headroom."""
+    cpus = os.cpu_count() or 4
+    return max(2, min(8, cpus // 2))
+
+
+def _default_max_concurrency() -> int:
+    """Ceiling for the elastic pool. Ingest is mostly I/O (embedding/index network),
+    so concurrency above core count is useful, but bound it so we never thrash —
+    the controller only reaches this when load is low and backlog is high."""
+    cpus = os.cpu_count() or 4
+    return max(4, min(16, cpus * 2))
 
 
 class IngestionSettings(SealedSettings):
@@ -68,6 +86,23 @@ class IngestionSettings(SealedSettings):
     # Per-tenant rate limit
     ingest_rps: float = Field(10.0, validation_alias="INGEST_RPS")
     ingest_burst: float = Field(20.0, validation_alias="INGEST_BURST")
+
+    # ── Async ingest queue (bounded executor) ───────────────────────────
+    # Jobs run on a fixed pool of workers (the "work queue" = active slots)
+    # draining a bounded waiting queue. A burst of ingests queues instead of
+    # crashing the worker; when the waiting queue is full, /ingest/* returns
+    # 429 (retry later). Embedding is the bottleneck, so keep concurrency low.
+    ingest_concurrency: int = Field(default_factory=_default_ingest_concurrency, validation_alias="INGEST_CONCURRENCY")
+    ingest_waiting_queue_max: int = Field(100, validation_alias="INGEST_WAITING_QUEUE_MAX")
+    # Elastic pool bounds + load watermarks. The number of concurrent workers floats
+    # between min and max driven by the 1-min system load average per core: scale up
+    # below `load_low` when there's backlog, scale down above `load_high` (system-wide
+    # load, so we yield to other VM processes too). All overridable; nothing hardcoded.
+    ingest_min_concurrency: int = Field(1, validation_alias="INGEST_MIN_CONCURRENCY")
+    ingest_max_concurrency: int = Field(default_factory=_default_max_concurrency, validation_alias="INGEST_MAX_CONCURRENCY")
+    ingest_load_high: float = Field(1.0, validation_alias="INGEST_LOAD_HIGH")   # loadavg/core ≥ this → scale down
+    ingest_load_low: float = Field(0.7, validation_alias="INGEST_LOAD_LOW")     # loadavg/core < this → may scale up
+    ingest_control_interval: float = Field(3.0, validation_alias="INGEST_CONTROL_INTERVAL")
 
     # ── Audit + principal HMAC (SECRET) ─────────────────────────────────
     audit_hmac_secret: SecretStr = sealed_field(

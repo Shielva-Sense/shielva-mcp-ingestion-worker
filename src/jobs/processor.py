@@ -8,6 +8,7 @@ from typing import List
 
 from ..pipeline import IngestionPipeline
 from ..models import Document, IngestionJob
+from .webhook import notify_webhook
 
 logger = structlog.get_logger(__name__)
 
@@ -33,64 +34,19 @@ class JobProcessor:
         )
         
         job.status = "processing"
-        
+
+        # The FINAL completion/failure webhook is fired exactly once by the queue's
+        # worker loop (every ingest path goes through it). Here we only emit live
+        # PROGRESS updates via on_progress so the UI can show server-side progress.
         try:
-            # Run pipeline
-            await self.pipeline.ingest_batch(documents, job, on_progress=self._trigger_webhook)
-            
+            await self.pipeline.ingest_batch(documents, job, on_progress=notify_webhook)
             job.status = "completed"
             logger.info("Job execution completed", job_id=job.job_id)
-
-            # Trigger Webhook if URL is present
-            if job.webhook_url:
-                await self._trigger_webhook(job)
-            
         except Exception as e:
             job.status = "failed"
             job.errors.append(str(e))
-            logger.error(
-                "Job execution failed",
-                job_id=job.job_id,
-                error=str(e)
-            )
-            
-            # Trigger Webhook for failure too
-            if job.webhook_url:
-                await self._trigger_webhook(job)
-
-    async def _trigger_webhook(self, job: IngestionJob):
-        """Send job stats to webhook."""
-        import httpx
-        try:
-            payload = {
-                "job_id": job.job_id,
-                "kb_id": job.kb_id,
-                "status": job.status,
-                "documents_processed": job.documents_processed,
-                "documents_failed": job.documents_failed,
-                "chunks_created": job.chunks_created,
-                "completed_at": job.completed_at.isoformat() if job.completed_at else None,
-                "errors": job.errors
-            }
-            
-            async with httpx.AsyncClient() as client:
-                # We need to pass tenant_id header if possible, but IngestionJob has it
-                response = await client.post(
-                    job.webhook_url,
-                    json=payload,
-                    headers={"X-Tenant-ID": job.tenant_id},
-                    timeout=10.0
-                )
-                
-                if response.status_code != 200:
-                    logger.warning(
-                        "Webhook failed", 
-                        url=job.webhook_url, 
-                        status=response.status_code,
-                        response=response.text
-                    )
-                else:
-                    logger.info("Webhook triggered successfully", url=job.webhook_url)
-                    
-        except Exception as e:
-            logger.error("Failed to trigger webhook", error=str(e))
+            logger.error("Job execution failed", job_id=job.job_id, error=str(e))
+        finally:
+            if job.completed_at is None:
+                from datetime import datetime as _dt
+                job.completed_at = _dt.utcnow()
