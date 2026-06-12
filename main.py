@@ -63,6 +63,8 @@ from src.indexer import VectorIndexer
 from src.embedder import EmbeddingClient, EmbedderConfig
 from src.jobs.manager import job_manager
 from src.jobs.processor import JobProcessor
+from src.jobs import queue as _ingest_queue_mod
+from src.jobs.queue import IngestQueue, QueueFull
 
 from src.vectorstore import SupabaseVectorStore
 
@@ -238,6 +240,20 @@ async def lifespan(app: FastAPI):
     )
     processor = JobProcessor(pipeline)
 
+    # Elastic, load-aware async ingest executor: concurrency floats between
+    # min/max driven by system load; bounded waiting queue; decoupled completion
+    # queue for response delivery. Started here so it binds to the running loop.
+    _ingest_queue_mod.ingest_queue = IngestQueue(
+        initial=settings.ingest_concurrency,
+        min_workers=settings.ingest_min_concurrency,
+        max_workers=settings.ingest_max_concurrency,
+        waiting_max=settings.ingest_waiting_queue_max,
+        load_high=settings.ingest_load_high,
+        load_low=settings.ingest_load_low,
+        control_interval=settings.ingest_control_interval,
+    )
+    _ingest_queue_mod.ingest_queue.start()
+
     # Redis-backed token bucket for per-tenant rate limiting. Falls
     # back to a local-only bucket when REDIS_URL is unset (dev only).
     redis_url = settings.redis_url.get_secret_value()
@@ -259,6 +275,8 @@ async def lifespan(app: FastAPI):
     yield
 
     # Cleanup
+    if _ingest_queue_mod.ingest_queue is not None:
+        await _ingest_queue_mod.ingest_queue.stop()
     await vector_store.close()
     await http_client.aclose()
     logger.info("Ingestion Worker shutdown")
@@ -328,14 +346,43 @@ _ingest_rate_limit = per_tenant_rate_limit(
 )
 
 
+def _submit_to_queue(job, run) -> None:
+    """Enqueue (job, run) on the bounded ingest queue. Raises 503 if the queue
+    isn't ready, 429 (Retry-After) when the waiting queue is at capacity — so a
+    burst of ingests queues or backs off cleanly instead of crashing the worker."""
+    q = _ingest_queue_mod.ingest_queue
+    if q is None:
+        raise HTTPException(status_code=503, detail="Ingest queue not initialised")
+    try:
+        q.submit(job, run)
+    except QueueFull as exc:
+        raise HTTPException(status_code=429, detail=str(exc), headers={"Retry-After": "30"})
+
+
+def _queued_job_response(job) -> "JobStatusResponse":
+    return JobStatusResponse(
+        job_id=job.job_id, status=job.status, documents_total=job.documents_total,
+        documents_processed=job.documents_processed, documents_failed=job.documents_failed,
+        chunks_created=job.chunks_created, started_at=job.started_at,
+        completed_at=job.completed_at, errors=job.errors,
+    )
+
+
+@app.get("/queue/stats")
+async def queue_stats(principal: Principal = Depends(require_principal)):
+    """Live queue depth: active (work queue) + waiting + capacity."""
+    q = _ingest_queue_mod.ingest_queue
+    return q.stats() if q is not None else {"error": "queue not initialised"}
+
+
 @app.post(
     "/ingest",
     response_model=IngestResponse,
+    status_code=202,
     dependencies=[Depends(_ingest_rate_limit)],
 )
 async def ingest_documents(
     request: IngestBatchRequest,
-    background_tasks: BackgroundTasks,
     principal: Principal = Depends(require_principal),
 ):
     """Ingest a batch of documents (async background processing).
@@ -373,12 +420,12 @@ async def ingest_documents(
             )
         )
 
-    background_tasks.add_task(processor.process_job, job, documents)
+    _submit_to_queue(job, lambda: processor.process_job(job, documents))
 
     return IngestResponse(
         job_id=job.job_id,
         status="queued",
-        message="Ingestion started in background",
+        message="Ingestion queued",
         documents_queued=len(request.documents),
     )
 
@@ -474,12 +521,14 @@ def _stable_doc_id(label: str, kb_id: str, key: str, content) -> str:
 @app.post(
     "/ingest/file",
     response_model=JobStatusResponse,
+    status_code=202,
     dependencies=[Depends(_ingest_rate_limit)],
 )
 async def ingest_files(
     kb_id: str = Form(...),
     files: List[UploadFile] = File(...),
     guardrails: str = Form("{}"),
+    webhook_url: str = Form(""),
     principal: Principal = Depends(require_principal),
 ):
     """Ingest uploaded files of ANY supported format into a KB.
@@ -497,7 +546,7 @@ async def ingest_files(
         tenant_id=principal.tenant_id,
         kb_id=kb_id,
         documents_count=len(files),
-        webhook_url=None,
+        webhook_url=webhook_url or None,
     )
 
     try:
@@ -529,19 +578,155 @@ async def ingest_files(
     if total_bytes > caps.max_total_bytes_per_batch:
         raise HTTPException(status_code=413, detail="Upload exceeds total batch size cap")
 
-    await processor.process_job(job, documents)
+    # Files are already read into memory above (the multipart body can't be read
+    # after we respond), so enqueue the parse/chunk/embed/index work and return 202.
+    _submit_to_queue(job, lambda: processor.process_job(job, documents))
+    return _queued_job_response(job)
 
-    return JobStatusResponse(
-        job_id=job.job_id,
-        status=job.status,
-        documents_total=job.documents_total,
-        documents_processed=job.documents_processed,
-        documents_failed=job.documents_failed,
-        chunks_created=job.chunks_created,
-        started_at=job.started_at,
-        completed_at=job.completed_at,
-        errors=job.errors,
+
+class IngestR2Request(BaseModel):
+    """Ingest a single object already uploaded to R2 by the browser.
+
+    The win over /ingest/file: core-api never touches the bytes (the browser PUTs
+    straight to R2 via a presigned URL), and the worker STREAMS the object from R2
+    instead of receiving a buffered multipart body — so a multi-GB file never gets
+    fully buffered in core-api's memory.
+    """
+    kb_id: str
+    key: str
+    filename: str
+    bucket: Optional[str] = None
+    guardrails: Optional[Dict[str, Any]] = None
+    webhook_url: Optional[str] = None
+
+
+@app.post(
+    "/ingest/r2",
+    response_model=JobStatusResponse,
+    status_code=202,
+    dependencies=[Depends(_ingest_rate_limit)],
+)
+async def ingest_r2(
+    body: IngestR2Request,
+    principal: Principal = Depends(require_principal),
+):
+    """Stream a single uploaded object from R2 and ingest it into a KB.
+
+    Mirrors ``ingest_files`` (same Document build / doc_type routing / _guardrails
+    metadata / _stable_doc_id / process_job / return shape) — the only difference
+    is the bytes come from a streamed R2 GET instead of a multipart upload, so
+    core-api never buffers them. Tenant is the verified principal; the object key
+    is expected to be tenant-scoped (core-api validates the prefix before
+    forwarding) but the worker re-checks it as defence in depth.
+    """
+    from src.fetcher import fetch_r2_object
+
+    if not body.key or not body.filename:
+        raise HTTPException(status_code=400, detail="key and filename are required")
+
+    # Defence in depth: the object key MUST start with this tenant's prefix. Reject
+    # path traversal and cross-tenant keys even though core-api already validated —
+    # the worker must never trust that an upstream check ran.
+    if ".." in body.key or body.key.startswith("/"):
+        raise HTTPException(status_code=400, detail="Invalid object key")
+    expected_prefix = f"{principal.tenant_id}/{body.kb_id}/"
+    if not body.key.startswith(expected_prefix):
+        raise HTTPException(status_code=403, detail="Object key is outside this tenant/KB prefix")
+
+    caps = get_settings()
+    bucket = body.bucket or os.environ.get("R2_KNOWLEDGE_BUCKET", "") or "shielva-arc-knowledge"
+    doc_type = _doctype_for_filename(body.filename or "")
+
+    job = job_manager.create_job(
+        tenant_id=principal.tenant_id,
+        kb_id=body.kb_id,
+        documents_count=1,
+        webhook_url=body.webhook_url,
     )
+
+    # All R2 ingest work runs on the bounded queue and returns 202 immediately; the
+    # completion webhook is fired by the queue worker loop. TRUE streaming (constant
+    # RAM, never fully buffered): TEXT-like → read R2 in 1 MiB windows, decode + chunk
+    # + embed incrementally; PDF → temp file then page-by-page. docx/xlsx + fallback
+    # use a bytes fetch. Failures here mark the job failed (the client already has 202).
+    from src.streaming import (
+        STREAMABLE_DOCTYPES, OFFICE_STREAMABLE_DOCTYPES,
+        stream_ingest_r2, stream_ingest_pdf_r2, stream_ingest_office_r2,
+    )
+    _stream_fn = (
+        stream_ingest_r2 if doc_type in STREAMABLE_DOCTYPES
+        else stream_ingest_pdf_r2 if doc_type == DocumentType.PDF
+        else stream_ingest_office_r2 if doc_type in OFFICE_STREAMABLE_DOCTYPES
+        else None
+    )
+
+    async def _run() -> None:
+        if _stream_fn is not None:
+            document = Document(
+                id=_stable_doc_id("upload", body.kb_id, body.key, b""),  # stable from the uuid'd key
+                tenant_id=principal.tenant_id,
+                kb_id=body.kb_id,
+                content="",  # streamed, not buffered
+                title=body.filename or "uploaded-file",
+                source_url=None,
+                doc_type=doc_type,
+                metadata={"upload": True, "filename": body.filename, "r2_key": body.key, "streamed": True},
+            )
+            try:
+                chunks = await _stream_fn(
+                    bucket=bucket, key=body.key, document=document,
+                    guardrails=body.guardrails or {}, pipeline=pipeline,
+                )
+                job.chunks_created = chunks
+                job.documents_processed = 1
+                job.documents_failed = 0
+                job.status = "completed"
+            except Exception as exc:  # noqa: BLE001
+                logger.error("stream_ingest_r2_failed", key=body.key, error=str(exc))
+                job.documents_failed = 1
+                job.status = "failed"
+                job.errors.append(str(exc))
+            job.completed_at = datetime.utcnow()
+            return
+
+        # Binary (pdf/docx/xlsx) → full-load path: the parser needs the whole bytes.
+        result = await fetch_r2_object(bucket, body.key)
+        if result.error:
+            job.status = "failed"
+            job.documents_failed = 1
+            job.errors.append(f"R2 fetch failed: {result.error}")
+            job.completed_at = datetime.utcnow()
+            return
+
+        raw = result.content
+        if len(raw) > caps.max_bytes_per_document:
+            job.status = "failed"
+            job.documents_failed = 1
+            job.errors.append(f"{body.filename} exceeds per-document size cap")
+            job.completed_at = datetime.utcnow()
+            return
+
+        content = raw if doc_type in _BINARY_DOCTYPES else raw.decode("utf-8", errors="ignore")
+        document = Document(
+            id=_stable_doc_id("upload", body.kb_id, body.filename or body.key, raw),
+            tenant_id=principal.tenant_id,
+            kb_id=body.kb_id,
+            content=content,
+            title=body.filename or "uploaded-file",
+            source_url=None,
+            doc_type=doc_type,
+            metadata={
+                "upload": True,
+                "filename": body.filename,
+                "size": len(raw),
+                "r2_key": body.key,
+                "_guardrails": body.guardrails or {},
+            },
+        )
+        await processor.process_job(job, [document])
+
+    _submit_to_queue(job, _run)
+    return _queued_job_response(job)
 
 
 class IngestUrlRequest(BaseModel):
@@ -550,6 +735,7 @@ class IngestUrlRequest(BaseModel):
     crawl: bool = False
     max_pages: int = 20
     max_depth: int = 2
+    webhook_url: Optional[str] = None
 
 
 class IngestDatabaseRequest(BaseModel):
@@ -559,6 +745,7 @@ class IngestDatabaseRequest(BaseModel):
     query: Optional[str] = None
     collection: Optional[str] = None
     limit: int = 1000
+    webhook_url: Optional[str] = None
 
 
 class IngestApiRequest(BaseModel):
@@ -569,14 +756,15 @@ class IngestApiRequest(BaseModel):
     body: Optional[Dict[str, Any]] = None
     json_path: Optional[str] = None
     limit: int = 500
+    webhook_url: Optional[str] = None
 
 
-async def _ingest_source_docs(kb_id: str, tenant_id: str, docs, label: str) -> "JobStatusResponse":
+async def _ingest_source_docs(kb_id: str, tenant_id: str, docs, label: str, webhook_url: Optional[str] = None) -> "JobStatusResponse":
     """Wrap (title, content, doc_type) tuples from a source adapter into Documents
-    and run them through the pipeline (sync)."""
+    and enqueue the embed/index work on the bounded queue (returns 202/queued)."""
     if not docs:
         raise HTTPException(status_code=422, detail="Source returned no content")
-    job = job_manager.create_job(tenant_id=tenant_id, kb_id=kb_id, documents_count=len(docs), webhook_url=None)
+    job = job_manager.create_job(tenant_id=tenant_id, kb_id=kb_id, documents_count=len(docs), webhook_url=webhook_url)
     documents = []
     for title, content, doc_type in docs:
         try:
@@ -588,13 +776,8 @@ async def _ingest_source_docs(kb_id: str, tenant_id: str, docs, label: str) -> "
             content=content, title=title, source_url=None, doc_type=dt,
             metadata={"source": label},
         ))
-    await processor.process_job(job, documents)
-    return JobStatusResponse(
-        job_id=job.job_id, status=job.status, documents_total=job.documents_total,
-        documents_processed=job.documents_processed, documents_failed=job.documents_failed,
-        chunks_created=job.chunks_created, started_at=job.started_at,
-        completed_at=job.completed_at, errors=job.errors,
-    )
+    _submit_to_queue(job, lambda: processor.process_job(job, documents))
+    return _queued_job_response(job)
 
 
 @app.post("/ingest/url", response_model=JobStatusResponse, dependencies=[Depends(_ingest_rate_limit)])
@@ -604,7 +787,7 @@ async def ingest_url(body: IngestUrlRequest, principal: Principal = Depends(requ
         docs = await fetch_url(body.url, crawl=body.crawl, max_pages=body.max_pages, max_depth=body.max_depth)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
-    return await _ingest_source_docs(body.kb_id, principal.tenant_id, docs, "url")
+    return await _ingest_source_docs(body.kb_id, principal.tenant_id, docs, "url", body.webhook_url)
 
 
 @app.post("/ingest/database", response_model=JobStatusResponse, dependencies=[Depends(_ingest_rate_limit)])
@@ -617,7 +800,7 @@ async def ingest_database(body: IngestDatabaseRequest, principal: Principal = De
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
-    return await _ingest_source_docs(body.kb_id, principal.tenant_id, docs, "db")
+    return await _ingest_source_docs(body.kb_id, principal.tenant_id, docs, "db", body.webhook_url)
 
 
 @app.post("/ingest/api", response_model=JobStatusResponse, dependencies=[Depends(_ingest_rate_limit)])
@@ -630,7 +813,7 @@ async def ingest_api(body: IngestApiRequest, principal: Principal = Depends(requ
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
-    return await _ingest_source_docs(body.kb_id, principal.tenant_id, docs, "api")
+    return await _ingest_source_docs(body.kb_id, principal.tenant_id, docs, "api", body.webhook_url)
 
 
 @app.get("/jobs/{job_id}", response_model=JobStatusResponse)
