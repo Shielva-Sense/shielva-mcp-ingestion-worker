@@ -39,6 +39,7 @@ async def notify_webhook(job: IngestionJob) -> None:
         "documents_processed": job.documents_processed,
         "documents_failed": job.documents_failed,
         "chunks_created": job.chunks_created,
+        "kb_file_bytes": job.kb_file_bytes,
         "completed_at": job.completed_at.isoformat() if job.completed_at else None,
         "errors": job.errors,
     }

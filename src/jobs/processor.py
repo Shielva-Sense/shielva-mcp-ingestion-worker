@@ -50,3 +50,10 @@ class JobProcessor:
             if job.completed_at is None:
                 from datetime import datetime as _dt
                 job.completed_at = _dt.utcnow()
+            # Snapshot the KB's ABSOLUTE file-byte total so core-api can store it
+            # (cheap single query; lets the Knowledge page skip a per-KB worker call).
+            try:
+                stats = await self.pipeline.vector_store.kb_storage(job.tenant_id, job.kb_id)
+                job.kb_file_bytes = int(stats.get("file_bytes", 0))
+            except Exception as exc:  # noqa: BLE001 — stats are best-effort, never fail the job
+                logger.warning("kb_file_bytes snapshot failed", job_id=job.job_id, error=str(exc))

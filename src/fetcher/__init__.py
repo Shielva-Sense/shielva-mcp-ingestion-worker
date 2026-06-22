@@ -2,11 +2,99 @@
 Fetcher Module
 Document fetching from various sources.
 """
-from typing import Dict, Any, Optional
+import asyncio
+import os
+from typing import Dict, Any, Optional, Tuple
 from dataclasses import dataclass
 import structlog
 
 logger = structlog.get_logger(__name__)
+
+
+def _r2_coords() -> Tuple[str, str, str, str]:
+    """R2/S3 connection coords from env (mirrors the canonical boto3-against-R2
+    pattern in shielva-platform/app/account/r2_export.py and shielva-cdn adapter).
+
+    Returns (endpoint_url, access_key, secret_key, region). Creds are AWS-standard
+    R2 access/secret keys — sealed in production, plaintext .env in dev. Empty
+    values are returned as-is so the caller can fail with a clear error instead of
+    silently constructing an unauthenticated client.
+    """
+    endpoint = os.environ.get("R2_ENDPOINT_URL", "")
+    access = os.environ.get("R2_ACCESS_KEY", "") or os.environ.get("R2_ACCESS_KEY_ID", "")
+    secret = os.environ.get("R2_SECRET_KEY", "") or os.environ.get("R2_SECRET_ACCESS_KEY", "")
+    region = os.environ.get("R2_REGION", "") or "auto"
+    return endpoint, access, secret, region
+
+
+def _r2_client():
+    """Build a boto3 S3 client pointed at Cloudflare R2.
+
+    SigV4 + path-style addressing (R2's virtual-host bucket DNS isn't always
+    provisioned) — same config the platform/cdn services use. boto3 is synchronous;
+    callers run it in a worker thread to keep the event loop unblocked.
+    """
+    try:
+        import boto3
+        from botocore.config import Config as BotoConfig
+    except ImportError as exc:  # pragma: no cover - dep-presence guard
+        raise RuntimeError(
+            "boto3 is not installed — cannot fetch from R2. `pip install boto3`."
+        ) from exc
+
+    endpoint, access, secret, region = _r2_coords()
+    if not endpoint or not access or not secret:
+        raise RuntimeError(
+            "R2 is not configured (need R2_ENDPOINT_URL + R2_ACCESS_KEY + "
+            "R2_SECRET_KEY). Cannot fetch the uploaded object."
+        )
+    boto_cfg = BotoConfig(
+        signature_version="s3v4",
+        s3={"addressing_style": "path"},  # R2-safe
+        retries={"max_attempts": 3, "mode": "standard"},
+    )
+    return boto3.client(
+        "s3",
+        endpoint_url=endpoint,
+        aws_access_key_id=access,
+        aws_secret_access_key=secret,
+        region_name=region,
+        config=boto_cfg,
+    )
+
+
+def _stream_r2_object_sync(bucket: str, key: str) -> Tuple[bytes, str]:
+    """Synchronous boto3 GET that streams the object body in chunks (so the bytes
+    are read incrementally off the wire rather than via a single buffered
+    .content). Returns (body_bytes, content_type). Runs in a worker thread."""
+    client = _r2_client()
+    obj = client.get_object(Bucket=bucket, Key=key)
+    content_type = obj.get("ContentType") or "application/octet-stream"
+    body_stream = obj["Body"]  # botocore StreamingBody — iterable in chunks
+    buf = bytearray()
+    try:
+        for chunk in body_stream.iter_chunks(chunk_size=1024 * 1024):
+            if chunk:
+                buf.extend(chunk)
+    finally:
+        body_stream.close()
+    return bytes(buf), content_type
+
+
+async def fetch_r2_object(bucket: str, key: str) -> "FetchResult":
+    """Stream an object from R2 by (bucket, key). The blocking boto3 GET runs in a
+    worker thread; the StreamingBody is read in 1 MiB chunks so the object is
+    pulled off the wire incrementally instead of one buffered read."""
+    try:
+        content, content_type = await asyncio.to_thread(_stream_r2_object_sync, bucket, key)
+    except Exception as e:  # noqa: BLE001 — boto/botocore raise broadly
+        logger.error("r2_fetch_failed", bucket=bucket, key=key, error=str(e))
+        return FetchResult(content=b"", content_type="unknown", error=str(e))
+    return FetchResult(
+        content=content,
+        content_type=content_type,
+        metadata={"bucket": bucket, "key": key, "size": len(content)},
+    )
 
 
 @dataclass
@@ -110,17 +198,18 @@ class DocumentFetcher:
         )
     
     async def _fetch_s3(self, s3_uri: str) -> FetchResult:
-        """Fetch document from S3."""
-        # Parse s3://bucket/key
+        """Fetch (stream) a document from S3-compatible object storage (R2).
+
+        Parses ``s3://bucket/key`` and streams the body via :func:`fetch_r2_object`
+        — a real boto3 client pointed at R2 (SigV4, path-style, region 'auto'),
+        replacing the previous mock.
+        """
         parts = s3_uri.replace("s3://", "").split("/", 1)
         bucket = parts[0]
         key = parts[1] if len(parts) > 1 else ""
-        
-        # TODO: Implement with boto3
-        return FetchResult(
-            content=f"Mock S3 content from {bucket}/{key}".encode(),
-            content_type="application/octet-stream"
-        )
+        if not bucket or not key:
+            return FetchResult(content=b"", content_type="unknown", error=f"Malformed s3 uri: {s3_uri}")
+        return await fetch_r2_object(bucket, key)
     
     def _fetch_file(self, path: str) -> FetchResult:
         """Fetch document from local file."""
@@ -181,4 +270,4 @@ class DocumentFetcher:
         return "application/octet-stream"
 
 
-__all__ = ["DocumentFetcher", "FetchResult"]
+__all__ = ["DocumentFetcher", "FetchResult", "fetch_r2_object"]

@@ -78,6 +78,11 @@ class IngestQueue:
         self._queue: "asyncio.Queue[_QueuedWork]" = asyncio.Queue(maxsize=self.waiting_max)
         self._completion: "asyncio.Queue[IngestionJob]" = asyncio.Queue()
         self._inflight: Set[asyncio.Task] = set()
+        # Cancellation bookkeeping: the running task per job, every not-yet-completed
+        # job (for kb→job lookup), and job_ids a caller has asked to cancel.
+        self._task_by_job: Dict[str, asyncio.Task] = {}
+        self._active_jobs: Dict[str, IngestionJob] = {}
+        self._cancelled: Set[str] = set()
         self._slot_freed = asyncio.Event()
         self._dispatcher: Optional[asyncio.Task] = None
         self._controller: Optional[asyncio.Task] = None
@@ -130,6 +135,7 @@ class IngestQueue:
             self._queue.put_nowait(_QueuedWork(job, run))
         except asyncio.QueueFull as exc:
             raise QueueFull(f"ingest waiting queue full ({self.waiting_max}); retry shortly") from exc
+        self._active_jobs[job.job_id] = job
         job.status = "queued"
         waiting = self._queue.qsize()
         logger.info("ingest_job_queued", job_id=job.job_id, kb_id=job.kb_id,
@@ -149,19 +155,42 @@ class IngestQueue:
                     pass
             item = await self._queue.get()
             task = asyncio.create_task(self._run_one(item))
+            setattr(task, "_shielva_job_id", item.job.job_id)
             self._inflight.add(task)
+            self._task_by_job[item.job.job_id] = task
             task.add_done_callback(self._on_job_done)
 
     def _on_job_done(self, task: asyncio.Task) -> None:
         self._inflight.discard(task)
+        jid = getattr(task, "_shielva_job_id", None)
+        if jid is not None:
+            self._task_by_job.pop(jid, None)
         self._slot_freed.set()  # free a slot → wake the dispatcher
 
     async def _run_one(self, item: _QueuedWork) -> None:
         job = item.job
         try:
+            # Cancelled while still waiting in the queue → skip processing entirely.
+            if job.job_id in self._cancelled:
+                job.status = "cancelled"
+                job.errors.append("ingestion cancelled before it started")
+                if job.completed_at is None:
+                    job.completed_at = datetime.utcnow()
+                logger.info("ingest_job_cancelled_pre_run", job_id=job.job_id, kb_id=job.kb_id)
+                return
             job.status = "processing"
             await item.run()
         except asyncio.CancelledError:
+            if job.job_id in self._cancelled:
+                # USER-requested kill of a running job → mark + complete, swallow the
+                # cancellation (it was intentional, not a shutdown).
+                job.status = "cancelled"
+                job.errors.append("ingestion cancelled by user")
+                if job.completed_at is None:
+                    job.completed_at = datetime.utcnow()
+                logger.info("ingest_job_cancelled", job_id=job.job_id, kb_id=job.kb_id)
+                return
+            # Shutdown cancellation → propagate so stop() can drain cleanly.
             job.status = "failed"
             job.errors.append("worker cancelled (shutdown)")
             raise
@@ -173,9 +202,40 @@ class IngestQueue:
             logger.error("ingest_job_crashed", job_id=job.job_id, error=str(exc))
         finally:
             self._queue.task_done()
+            self._active_jobs.pop(job.job_id, None)
+            self._cancelled.discard(job.job_id)
             # Hand off to the completion queue and return — NOT held by the response
-            # delivery. Unbounded queue → put_nowait never blocks.
+            # delivery. Unbounded queue → put_nowait never blocks. (A cancelled job
+            # still reports completion so core-api flips the KB out of "ingesting".)
             self._completion.put_nowait(job)
+
+    # ── cancellation ────────────────────────────────────────────────────
+    def cancel(self, job_id: str) -> str:
+        """Request cancellation of a job.
+
+        Returns the disposition: ``'cancelling'`` (a running task was signalled),
+        ``'queued'`` (still waiting — it'll be skipped when dispatched), or
+        ``'not_found'`` (unknown / already completed).
+        """
+        job = self._active_jobs.get(job_id)
+        if job is None:
+            return "not_found"
+        self._cancelled.add(job_id)
+        task = self._task_by_job.get(job_id)
+        if task is not None and not task.done():
+            task.cancel()
+            return "cancelling"
+        return "queued"
+
+    def cancel_by_kb(self, kb_id: str) -> int:
+        """Cancel every active (queued or running) ingestion job for a KB.
+        Returns the number of jobs signalled."""
+        count = 0
+        for jid, job in list(self._active_jobs.items()):
+            if job.kb_id == kb_id and job.status not in ("ready", "failed", "cancelled"):
+                if self.cancel(jid) != "not_found":
+                    count += 1
+        return count
 
     # ── controller: float `target` with system load ────────────────────
     def _load_ratio(self) -> float:
