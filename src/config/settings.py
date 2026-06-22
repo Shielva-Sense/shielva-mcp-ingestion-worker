@@ -77,11 +77,18 @@ class IngestionSettings(SealedSettings):
     max_entries_per_batch: int = Field(
         100, validation_alias="INGEST_MAX_ENTRIES",
     )
+    # Per-document cap for the DIRECT multipart path (/ingest/file, /ingest/sync).
+    # The ARC UI routes files > 8 MB to the streaming R2 path (which is NOT byte-capped),
+    # and falls back to this direct path when R2 is unavailable — so this cap must
+    # comfortably exceed the UI's 8 MB threshold or legitimate documents 413. The old
+    # 256 KB default rejected nearly every real PDF/DOCX/deck (→ worker 413 → core-api 502).
+    # 25 MB covers typical KB documents; large files still stream via R2. Override per
+    # deployment with INGEST_MAX_DOC_BYTES / INGEST_MAX_TOTAL_BYTES.
     max_total_bytes_per_batch: int = Field(
-        5 * 1024 * 1024, validation_alias="INGEST_MAX_TOTAL_BYTES",
+        50 * 1024 * 1024, validation_alias="INGEST_MAX_TOTAL_BYTES",
     )
     max_bytes_per_document: int = Field(
-        256 * 1024, validation_alias="INGEST_MAX_DOC_BYTES",
+        25 * 1024 * 1024, validation_alias="INGEST_MAX_DOC_BYTES",
     )
     # Per-tenant rate limit
     ingest_rps: float = Field(10.0, validation_alias="INGEST_RPS")

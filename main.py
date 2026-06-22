@@ -972,6 +972,41 @@ async def list_kb_documents(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.get("/kb/{kb_id}/storage")
+async def kb_storage(
+    kb_id: str,
+    principal: Principal = Depends(require_principal),
+):
+    """Storage stats for a KB: document count, chunk (vector) count, cumulative
+    file bytes. Vector byte size is derived by the caller from chunks × dim×4."""
+    try:
+        stats = await pipeline.vector_store.kb_storage(
+            tenant_id=principal.tenant_id,
+            kb_id=kb_id,
+        )
+        return {"kb_id": kb_id, **stats}
+    except Exception as e:
+        logger.error("KB storage failed", error=str(e))
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/kb/{kb_id}/cancel")
+async def cancel_kb_ingestion(
+    kb_id: str,
+    principal: Principal = Depends(require_principal),
+):
+    """Kill in-flight / queued ingestion job(s) for a KB.
+
+    A running job's worker task is cancelled at its current await point; a still-
+    queued job is skipped when it would dispatch. Either way the job reports
+    completion (status ``cancelled``) so core-api moves the KB out of "ingesting".
+    """
+    q = _ingest_queue_mod.ingest_queue
+    n = q.cancel_by_kb(kb_id) if q is not None else 0
+    logger.info("ingest_cancel_requested", kb_id=kb_id, tenant=principal.tenant_id, cancelled=n)
+    return {"kb_id": kb_id, "cancelled": n}
+
+
 class UpdateChunkRequest(BaseModel):
     kb_id: str
     content: str

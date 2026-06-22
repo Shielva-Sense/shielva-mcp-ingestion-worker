@@ -259,10 +259,13 @@ class SupabaseVectorStore:
             logger.error("Failed to create indexes", error=str(e))
 
     async def list_documents(self, tenant_id: str, kb_id: str) -> List[Dict[str, Any]]:
-        """List distinct documents (id, title, chunk count) in a KB's collection.
+        """List distinct documents (id, title, chunk count, file bytes) in a KB.
 
-        Drives the "Files in this KB" UI so individual files can be removed. Returns
-        an empty list if the collection doesn't exist yet (no files ingested).
+        Drives the "Files in this KB" UI so individual files can be removed and
+        their size is shown. ``bytes`` is the document's original file size: it is
+        stored identically on every chunk of the document (Document.metadata.size
+        at ingest), so MAX over the group recovers it once. Returns an empty list
+        if the collection doesn't exist yet (no files ingested).
         """
         from sqlalchemy import text
         collection_name = self._get_collection_name(tenant_id, kb_id)
@@ -272,7 +275,8 @@ class SupabaseVectorStore:
                 sql = text(f"""
                     SELECT metadata->>'document_id' AS document_id,
                            COALESCE(NULLIF(MAX(metadata->>'title'), ''), NULLIF(MAX(metadata->>'filename'), '')) AS title,
-                           COUNT(*)                  AS chunks
+                           COUNT(*)                  AS chunks,
+                           MAX(COALESCE((metadata->>'size')::bigint, 0)) AS bytes
                     FROM vecs."{collection_name}"
                     WHERE COALESCE(metadata->>'document_id', '') <> ''
                     GROUP BY metadata->>'document_id'
@@ -281,10 +285,46 @@ class SupabaseVectorStore:
                 for row in sess.execute(sql):
                     doc_id = row[0]
                     title = (row[1] or "").strip() or doc_id
-                    documents.append({"document_id": doc_id, "title": title, "chunks": int(row[2])})
+                    documents.append({
+                        "document_id": doc_id,
+                        "title": title,
+                        "chunks": int(row[2]),
+                        "bytes": int(row[3] or 0),
+                    })
         except Exception as e:
             logger.warning("list_documents failed (collection may not exist)", collection=collection_name, error=str(e))
         return documents
+
+    async def kb_storage(self, tenant_id: str, kb_id: str) -> Dict[str, int]:
+        """Return ``{documents, chunks, file_bytes}`` for a KB's collection.
+
+        ``file_bytes`` sums each DISTINCT document's original size (size lives once
+        per document, replicated across its chunks — so per-document MAX then SUM).
+        Returns zeros if the collection doesn't exist yet. Cheap single round-trip.
+        """
+        from sqlalchemy import text
+        collection_name = self._get_collection_name(tenant_id, kb_id)
+        out = {"documents": 0, "chunks": 0, "file_bytes": 0}
+        try:
+            with self._client.Session() as sess:
+                row = sess.execute(text(f"""
+                    SELECT
+                      (SELECT COUNT(DISTINCT metadata->>'document_id')
+                         FROM vecs."{collection_name}"
+                        WHERE COALESCE(metadata->>'document_id','') <> '')            AS documents,
+                      (SELECT COUNT(*) FROM vecs."{collection_name}")                  AS chunks,
+                      (SELECT COALESCE(SUM(b), 0) FROM (
+                          SELECT MAX(COALESCE((metadata->>'size')::bigint, 0)) AS b
+                            FROM vecs."{collection_name}"
+                           WHERE COALESCE(metadata->>'document_id','') <> ''
+                           GROUP BY metadata->>'document_id'
+                       ) t)                                                            AS file_bytes
+                """)).first()
+                if row:
+                    out = {"documents": int(row[0] or 0), "chunks": int(row[1] or 0), "file_bytes": int(row[2] or 0)}
+        except Exception as e:
+            logger.warning("kb_storage failed (collection may not exist)", collection=collection_name, error=str(e))
+        return out
 
     async def list_chunks(self, tenant_id: str, kb_id: str, document_id: str = None, limit: int = 500) -> List[Dict[str, Any]]:
         """List individual chunks (id, text, source doc, order) in a KB — for content curation."""

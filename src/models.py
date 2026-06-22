@@ -67,6 +67,10 @@ class IngestionJob:
     documents_processed: int = 0
     documents_failed: int = 0
     chunks_created: int = 0
+    # Absolute cumulative file bytes for the WHOLE KB after this job (queried from
+    # the vector store at completion). core-api stores it so the Knowledge page reads
+    # per-KB file size without a worker round-trip per KB.
+    kb_file_bytes: int = 0
     started_at: Optional[datetime] = None
     completed_at: Optional[datetime] = None
     errors: List[str] = field(default_factory=list)
