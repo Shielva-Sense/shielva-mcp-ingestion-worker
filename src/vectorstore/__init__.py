@@ -1,6 +1,7 @@
 """
 Vector Store Module
 """
+
 from .models import VectorDocument, SearchResult
 from .supabase_store import SupabaseVectorStore
 

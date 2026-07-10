@@ -13,6 +13,7 @@ Private / gated / OAuth sources are NOT handled here — those go through the
 Integration Builder connectors. URL + API fetches are SSRF-guarded (public hosts
 only); DB hosts are guarded too except in development (local DBs).
 """
+
 from __future__ import annotations
 
 import ipaddress
@@ -43,6 +44,7 @@ def _get_pooled_engine(connection_uri: str):
     engine = _ENGINE_CACHE.get(connection_uri)
     if engine is None:
         from sqlalchemy import create_engine
+
         engine = create_engine(
             connection_uri,
             pool_size=5,
@@ -94,7 +96,11 @@ def _assert_db_host(host: Optional[str]) -> None:
 
 # ── URL / crawl ──────────────────────────────────────────────────────────────
 async def fetch_url(
-    url: str, *, crawl: bool = False, max_pages: int = 20, max_depth: int = 2,
+    url: str,
+    *,
+    crawl: bool = False,
+    max_pages: int = 20,
+    max_depth: int = 2,
 ) -> List[SourceDoc]:
     """Fetch a single public page, or BFS-crawl same-host pages when ``crawl``.
     Returns each page's raw HTML as an ``html`` doc (the pipeline parses it)."""
@@ -142,8 +148,12 @@ def _row_to_text(row: Dict[str, Any]) -> str:
 
 
 async def read_database(
-    db_type: str, connection_uri: str, *, query: Optional[str] = None,
-    collection: Optional[str] = None, limit: int = 1000,
+    db_type: str,
+    connection_uri: str,
+    *,
+    query: Optional[str] = None,
+    collection: Optional[str] = None,
+    limit: int = 1000,
 ) -> List[SourceDoc]:
     """Read rows/documents from a database as text docs. SQL must be read-only
     (SELECT). Mongo reads a collection (optionally filtered by a JSON query)."""
@@ -215,8 +225,13 @@ def _json_path(data: Any, path: Optional[str]) -> Any:
 
 
 async def read_api(
-    url: str, *, method: str = "GET", headers: Optional[Dict[str, str]] = None,
-    body: Optional[Dict[str, Any]] = None, json_path: Optional[str] = None, limit: int = 500,
+    url: str,
+    *,
+    method: str = "GET",
+    headers: Optional[Dict[str, str]] = None,
+    body: Optional[Dict[str, Any]] = None,
+    json_path: Optional[str] = None,
+    limit: int = 500,
 ) -> List[SourceDoc]:
     """Fetch a REST endpoint and turn the response into docs. If ``json_path``
     resolves to a list, each item becomes a doc; otherwise the whole payload is

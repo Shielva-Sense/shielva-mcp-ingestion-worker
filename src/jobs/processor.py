@@ -2,7 +2,7 @@
 Job Processor
 Handles the execution of ingestion jobs.
 """
-import asyncio
+
 import structlog
 from typing import List
 
@@ -16,23 +16,19 @@ logger = structlog.get_logger(__name__)
 class JobProcessor:
     """
     Processes ingestion jobs.
-    
+
     Executes the ingestion pipeline for a given job and set of documents.
     """
-    
+
     def __init__(self, pipeline: IngestionPipeline):
         self.pipeline = pipeline
-    
+
     async def process_job(self, job: IngestionJob, documents: List[Document]):
         """
         Process a job with the given documents.
         """
-        logger.info(
-            "Processing job",
-            job_id=job.job_id,
-            docs=len(documents)
-        )
-        
+        logger.info("Processing job", job_id=job.job_id, docs=len(documents))
+
         job.status = "processing"
 
         # The FINAL completion/failure webhook is fired exactly once by the queue's
@@ -49,6 +45,7 @@ class JobProcessor:
         finally:
             if job.completed_at is None:
                 from datetime import datetime as _dt
+
                 job.completed_at = _dt.utcnow()
             # Snapshot the KB's ABSOLUTE file-byte total so core-api can store it
             # (cheap single query; lets the Knowledge page skip a per-KB worker call).

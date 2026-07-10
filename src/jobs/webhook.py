@@ -11,6 +11,7 @@ TLS verification uses the internal CA bundle — core-api serves the dev self-si
 cert, so a bare client (the old behaviour) failed the handshake and silently dropped
 the callback.
 """
+
 from __future__ import annotations
 
 import httpx

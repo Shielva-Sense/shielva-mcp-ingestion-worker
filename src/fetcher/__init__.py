@@ -2,6 +2,7 @@
 Fetcher Module
 Document fetching from various sources.
 """
+
 import asyncio
 import os
 from typing import Dict, Any, Optional, Tuple
@@ -38,9 +39,7 @@ def _r2_client():
         import boto3
         from botocore.config import Config as BotoConfig
     except ImportError as exc:  # pragma: no cover - dep-presence guard
-        raise RuntimeError(
-            "boto3 is not installed — cannot fetch from R2. `pip install boto3`."
-        ) from exc
+        raise RuntimeError("boto3 is not installed — cannot fetch from R2. `pip install boto3`.") from exc
 
     endpoint, access, secret, region = _r2_coords()
     if not endpoint or not access or not secret:
@@ -100,6 +99,7 @@ async def fetch_r2_object(bucket: str, key: str) -> "FetchResult":
 @dataclass
 class FetchResult:
     """Result of document fetch."""
+
     content: bytes
     content_type: str
     encoding: str = "utf-8"
@@ -110,43 +110,39 @@ class FetchResult:
 class DocumentFetcher:
     """
     Fetches documents from various sources.
-    
+
     Supports:
     - HTTP/HTTPS URLs
     - S3 buckets
     - Local files
     - Base64 encoded content
     """
-    
-    def __init__(self, http_client = None):
+
+    def __init__(self, http_client=None):
         """
         Initialize fetcher.
-        
+
         Args:
             http_client: HTTP client for URL fetching
         """
         self.http_client = http_client
-        
+
         logger.info("DocumentFetcher initialized")
-    
-    async def fetch(
-        self,
-        source: str,
-        source_type: str = "auto"
-    ) -> FetchResult:
+
+    async def fetch(self, source: str, source_type: str = "auto") -> FetchResult:
         """
         Fetch document from source.
-        
+
         Args:
             source: Source location (URL, path, etc.)
             source_type: Type of source (url, s3, file, base64)
-            
+
         Returns:
             Fetch result with content
         """
         if source_type == "auto":
             source_type = self._detect_source_type(source)
-        
+
         try:
             if source_type == "url":
                 return await self._fetch_url(source)
@@ -157,19 +153,11 @@ class DocumentFetcher:
             elif source_type == "base64":
                 return self._decode_base64(source)
             else:
-                return FetchResult(
-                    content=b"",
-                    content_type="unknown",
-                    error=f"Unknown source type: {source_type}"
-                )
+                return FetchResult(content=b"", content_type="unknown", error=f"Unknown source type: {source_type}")
         except Exception as e:
             logger.error("Fetch failed", source=source, error=str(e))
-            return FetchResult(
-                content=b"",
-                content_type="unknown",
-                error=str(e)
-            )
-    
+            return FetchResult(content=b"", content_type="unknown", error=str(e))
+
     def _detect_source_type(self, source: str) -> str:
         """Detect source type from URL/path."""
         if source.startswith("http://") or source.startswith("https://"):
@@ -180,7 +168,7 @@ class DocumentFetcher:
             return "base64"
         else:
             return "file"
-    
+
     async def _fetch_url(self, url: str) -> FetchResult:
         """Fetch document from URL."""
         if self.http_client:
@@ -188,15 +176,12 @@ class DocumentFetcher:
             return FetchResult(
                 content=response.content,
                 content_type=response.headers.get("content-type", "text/html"),
-                metadata={"status_code": response.status_code}
+                metadata={"status_code": response.status_code},
             )
-        
+
         # Mock
-        return FetchResult(
-            content=b"Mock content from URL",
-            content_type="text/html"
-        )
-    
+        return FetchResult(content=b"Mock content from URL", content_type="text/html")
+
     async def _fetch_s3(self, s3_uri: str) -> FetchResult:
         """Fetch (stream) a document from S3-compatible object storage (R2).
 
@@ -210,31 +195,24 @@ class DocumentFetcher:
         if not bucket or not key:
             return FetchResult(content=b"", content_type="unknown", error=f"Malformed s3 uri: {s3_uri}")
         return await fetch_r2_object(bucket, key)
-    
+
     def _fetch_file(self, path: str) -> FetchResult:
         """Fetch document from local file."""
         try:
             with open(path, "rb") as f:
                 content = f.read()
-            
+
             # Detect content type
             content_type = self._detect_content_type(path)
-            
-            return FetchResult(
-                content=content,
-                content_type=content_type
-            )
+
+            return FetchResult(content=content, content_type=content_type)
         except FileNotFoundError:
-            return FetchResult(
-                content=b"",
-                content_type="unknown",
-                error=f"File not found: {path}"
-            )
-    
+            return FetchResult(content=b"", content_type="unknown", error=f"File not found: {path}")
+
     def _decode_base64(self, data_uri: str) -> FetchResult:
         """Decode base64 encoded content."""
         import base64
-        
+
         # Parse data:mime;base64,content
         if "," in data_uri:
             header, content = data_uri.split(",", 1)
@@ -242,13 +220,13 @@ class DocumentFetcher:
         else:
             content = data_uri
             content_type = "application/octet-stream"
-        
+
         try:
             decoded = base64.b64decode(content)
             return FetchResult(content=decoded, content_type=content_type)
         except Exception as e:
             return FetchResult(content=b"", content_type="unknown", error=str(e))
-    
+
     def _detect_content_type(self, path: str) -> str:
         """Detect content type from file extension."""
         ext_map = {
@@ -260,13 +238,13 @@ class DocumentFetcher:
             ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
             ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             ".json": "application/json",
-            ".csv": "text/csv"
+            ".csv": "text/csv",
         }
-        
+
         for ext, content_type in ext_map.items():
             if path.lower().endswith(ext):
                 return content_type
-        
+
         return "application/octet-stream"
 
 

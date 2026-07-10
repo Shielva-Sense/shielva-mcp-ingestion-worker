@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+
+# Virtualenvs
+.venv/
+venv/
+
+# Coverage artifacts (coverage.xml is produced fresh by CI)
+.coverage
+coverage.xml
+htmlcov/
+
+# Env / secrets
+.env
+.env.local

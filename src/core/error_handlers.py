@@ -47,7 +47,5 @@ def install_exception_handlers(app: FastAPI) -> None:
 
     @app.exception_handler(Exception)
     async def _generic(req, exc: Exception) -> JSONResponse:
-        logger.exception(
-            "unhandled_exception", exc_type=type(exc).__name__, path=req.url.path
-        )
+        logger.exception("unhandled_exception", exc_type=type(exc).__name__, path=req.url.path)
         return _err(500, "INTERNAL_ERROR", "An internal error occurred.")

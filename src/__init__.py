@@ -1,14 +1,9 @@
 """
 Ingestion Worker Source Package
 """
-from .pipeline import (
-    IngestionPipeline,
-    Document,
-    Chunk,
-    IngestionJob,
-    DocumentType,
-    ChunkingStrategy
-)
+
+from .pipeline import IngestionPipeline
+from .models import Document, Chunk, IngestionJob, DocumentType, ChunkingStrategy
 from .cleaner import TextCleaner
 from .embedder import EmbeddingClient, EmbedderConfig
 from .fetcher import DocumentFetcher, FetchResult
@@ -19,30 +14,25 @@ __all__ = [
     # Pipeline
     "IngestionPipeline",
     "Document",
-    "Chunk", 
+    "Chunk",
     "IngestionJob",
     "DocumentType",
     "ChunkingStrategy",
-    
     # Cleaner
     "TextCleaner",
-    
     # Embedder
     "EmbeddingClient",
     "EmbedderConfig",
-    
     # Fetcher
     "DocumentFetcher",
     "FetchResult",
-    
     # Indexer
     "VectorIndexer",
     "IndexerConfig",
     "IndexedChunk",
-    
     # Retry
     "RetryConfig",
     "retry_async",
     "with_retry",
-    "CircuitBreaker"
+    "CircuitBreaker",
 ]

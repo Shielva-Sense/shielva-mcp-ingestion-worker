@@ -55,7 +55,7 @@ WORKDIR /build
 COPY requirements.txt ./requirements.txt
 RUN pip install -r requirements.txt \
     && pip install \
-        "shielva-common @ git+https://github.com/Shielva-AI/shielva-platform-core@shielva-common-v0.2.0#subdirectory=shielva-common"
+        "shielva-common @ git+https://github.com/Shielva-AI/shielva-platform-core@shielva-common-v1.2.1#subdirectory=shielva-common"
 
 # Sanity gate — fail the build if core imports cannot resolve.
 RUN python -c "import fastapi, uvicorn, structlog, httpx; import shielva_common; print('builder ok')"

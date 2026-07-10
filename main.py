@@ -13,12 +13,16 @@ Hardening (2026-05-29):
   * Settings come from SealedSettings — secrets MUST come from
     envelope decryption / file mount.
 """
+
 # ── Envelope decryption (must run BEFORE any settings/env-reading imports) ──
 import os as _envelope_os
+
 _envelope_os.environ.setdefault("VAULT_SIDECAR_URL", "https://localhost:8054")
 from dotenv import load_dotenv as _envelope_load_dotenv
-_envelope_load_dotenv(".env", override=True)   # ciphertext + REDIS_URL passthrough
+
+_envelope_load_dotenv(".env", override=True)  # ciphertext + REDIS_URL passthrough
 from shielva_common.envelope import bootstrap as _envelope_bootstrap
+
 _envelope_bootstrap()
 # ──────────────────────────────────────────────────────────────────────────
 
@@ -26,7 +30,6 @@ import uuid as _uuid_mod
 import structlog.contextvars as _structlog_cv
 
 from fastapi import (
-    BackgroundTasks,
     Depends,
     FastAPI,
     File,
@@ -44,7 +47,6 @@ import httpx
 import json
 import structlog
 import uvicorn
-import uuid
 
 from shielva_common.auth import Principal, require_principal
 from shielva_common.ratelimit import per_tenant_rate_limit, PerTenantTokenBucket
@@ -55,7 +57,9 @@ import os  # noqa: E402 — plain os (the envelope alias above shadows the name)
 from src.pipeline import IngestionPipeline
 from src.sources import fetch_url, read_database, read_api
 from src.models import (
-    IngestionJob, Document, DocumentType, ChunkingStrategy,
+    Document,
+    DocumentType,
+    ChunkingStrategy,
 )
 from src.chunker import Chunker
 from src.fetcher import DocumentFetcher
@@ -82,9 +86,7 @@ structlog.configure(
         structlog.processors.JSONRenderer(),
     ],
     wrapper_class=structlog.make_filtering_bound_logger(
-        __import__("logging").getLevelName(
-            __import__("os").environ.get("LOG_LEVEL", "INFO").upper()
-        )
+        __import__("logging").getLevelName(__import__("os").environ.get("LOG_LEVEL", "INFO").upper())
     ),
     context_class=dict,
     logger_factory=structlog.PrintLoggerFactory(),
@@ -97,6 +99,7 @@ logger = structlog.get_logger(__name__)
 
 class IngestDocumentRequest(BaseModel):
     """Single document ingestion request"""
+
     id: str
     content: str
     title: str
@@ -107,6 +110,7 @@ class IngestDocumentRequest(BaseModel):
 
 class IngestBatchRequest(BaseModel):
     """Batch document ingestion request"""
+
     kb_id: str
     documents: List[IngestDocumentRequest]
     chunking_strategy: Optional[str] = None
@@ -116,6 +120,7 @@ class IngestBatchRequest(BaseModel):
 
 class IngestResponse(BaseModel):
     """Ingestion response"""
+
     job_id: str
     status: str
     message: str
@@ -124,6 +129,7 @@ class IngestResponse(BaseModel):
 
 class JobStatusResponse(BaseModel):
     """Job status response"""
+
     job_id: str
     status: str
     documents_total: int
@@ -137,6 +143,7 @@ class JobStatusResponse(BaseModel):
 
 class DeleteDocumentRequest(BaseModel):
     """Delete document request"""
+
     document_id: str
     kb_id: str
 
@@ -156,19 +163,13 @@ def _validate_batch_caps(batch: IngestBatchRequest) -> None:
     if len(batch.documents) > settings.max_entries_per_batch:
         raise HTTPException(
             status_code=413,
-            detail=(
-                f"too many entries (limit {settings.max_entries_per_batch}, "
-                f"got {len(batch.documents)})"
-            ),
+            detail=(f"too many entries (limit {settings.max_entries_per_batch}, got {len(batch.documents)})"),
         )
     total = sum(len(d.content or "") for d in batch.documents)
     if total > settings.max_total_bytes_per_batch:
         raise HTTPException(
             status_code=413,
-            detail=(
-                f"batch too large (limit {settings.max_total_bytes_per_batch} bytes, "
-                f"got {total})"
-            ),
+            detail=(f"batch too large (limit {settings.max_total_bytes_per_batch} bytes, got {total})"),
         )
     for d in batch.documents:
         if len(d.content or "") > settings.max_bytes_per_document:
@@ -196,10 +197,7 @@ async def lifespan(app: FastAPI):
 
     # Resolve secrets via SealedSettings — fail-closed if absent.
     supabase_db_url = settings.supabase_db_url.get_secret_value()
-    embedding_api_key = (
-        settings.gemini_api_key.get_secret_value()
-        or settings.openai_api_key.get_secret_value()
-    )
+    embedding_api_key = settings.gemini_api_key.get_secret_value() or settings.openai_api_key.get_secret_value()
 
     vector_store = SupabaseVectorStore(
         db_url=supabase_db_url,
@@ -260,6 +258,7 @@ async def lifespan(app: FastAPI):
     if redis_url:
         try:
             import redis.asyncio as redis_asyncio
+
             redis_client = redis_asyncio.from_url(redis_url, decode_responses=False)
             app.state.token_bucket = PerTenantTokenBucket(redis_client)
             logger.info("rate_limit_backend", backend="redis")
@@ -290,6 +289,7 @@ app = FastAPI(
 )
 
 from src.core.error_handlers import install_exception_handlers as _install_exc
+
 _install_exc(app)
 
 
@@ -361,10 +361,15 @@ def _submit_to_queue(job, run) -> None:
 
 def _queued_job_response(job) -> "JobStatusResponse":
     return JobStatusResponse(
-        job_id=job.job_id, status=job.status, documents_total=job.documents_total,
-        documents_processed=job.documents_processed, documents_failed=job.documents_failed,
-        chunks_created=job.chunks_created, started_at=job.started_at,
-        completed_at=job.completed_at, errors=job.errors,
+        job_id=job.job_id,
+        status=job.status,
+        documents_total=job.documents_total,
+        documents_processed=job.documents_processed,
+        documents_failed=job.documents_failed,
+        chunks_created=job.chunks_created,
+        started_at=job.started_at,
+        completed_at=job.completed_at,
+        errors=job.errors,
     )
 
 
@@ -404,9 +409,7 @@ async def ingest_documents(
 
     documents = []
     for doc_req in request.documents:
-        doc_type = (
-            DocumentType(doc_req.doc_type) if doc_req.doc_type else DocumentType.TEXT
-        )
+        doc_type = DocumentType(doc_req.doc_type) if doc_req.doc_type else DocumentType.TEXT
         documents.append(
             Document(
                 id=doc_req.id,
@@ -451,9 +454,7 @@ async def ingest_documents_sync(
 
     documents = []
     for doc_req in request.documents:
-        doc_type = (
-            DocumentType(doc_req.doc_type) if doc_req.doc_type else DocumentType.TEXT
-        )
+        doc_type = DocumentType(doc_req.doc_type) if doc_req.doc_type else DocumentType.TEXT
         documents.append(
             Document(
                 id=doc_req.id,
@@ -484,14 +485,19 @@ async def ingest_documents_sync(
 
 # Map an uploaded file's extension to its document type. Unknown → treated as text.
 _EXT_TO_DOCTYPE = {
-    "txt": DocumentType.TEXT, "text": DocumentType.TEXT, "log": DocumentType.TEXT,
-    "md": DocumentType.MARKDOWN, "markdown": DocumentType.MARKDOWN,
-    "html": DocumentType.HTML, "htm": DocumentType.HTML,
+    "txt": DocumentType.TEXT,
+    "text": DocumentType.TEXT,
+    "log": DocumentType.TEXT,
+    "md": DocumentType.MARKDOWN,
+    "markdown": DocumentType.MARKDOWN,
+    "html": DocumentType.HTML,
+    "htm": DocumentType.HTML,
     "pdf": DocumentType.PDF,
     "docx": DocumentType.DOCX,
     "csv": DocumentType.CSV,
     "json": DocumentType.JSON,
-    "xlsx": DocumentType.XLSX, "xlsm": DocumentType.XLSX,
+    "xlsx": DocumentType.XLSX,
+    "xlsm": DocumentType.XLSX,
     "pptx": DocumentType.PPTX,
 }
 # Formats whose parser needs raw bytes (the rest are decoded to text first).
@@ -509,6 +515,7 @@ def _stable_doc_id(label: str, kb_id: str, key: str, content) -> str:
     from doc id), so duplicates aren't created. Different content → different id
     (a new doc; the old one is superseded on the next full sync)."""
     import hashlib
+
     h = hashlib.sha256()
     h.update((kb_id or "").encode("utf-8"))
     h.update(b"|")
@@ -592,6 +599,7 @@ class IngestR2Request(BaseModel):
     instead of receiving a buffered multipart body — so a multi-GB file never gets
     fully buffered in core-api's memory.
     """
+
     kb_id: str
     key: str
     filename: str
@@ -650,13 +658,20 @@ async def ingest_r2(
     # + embed incrementally; PDF → temp file then page-by-page. docx/xlsx + fallback
     # use a bytes fetch. Failures here mark the job failed (the client already has 202).
     from src.streaming import (
-        STREAMABLE_DOCTYPES, OFFICE_STREAMABLE_DOCTYPES,
-        stream_ingest_r2, stream_ingest_pdf_r2, stream_ingest_office_r2,
+        STREAMABLE_DOCTYPES,
+        OFFICE_STREAMABLE_DOCTYPES,
+        stream_ingest_r2,
+        stream_ingest_pdf_r2,
+        stream_ingest_office_r2,
     )
+
     _stream_fn = (
-        stream_ingest_r2 if doc_type in STREAMABLE_DOCTYPES
-        else stream_ingest_pdf_r2 if doc_type == DocumentType.PDF
-        else stream_ingest_office_r2 if doc_type in OFFICE_STREAMABLE_DOCTYPES
+        stream_ingest_r2
+        if doc_type in STREAMABLE_DOCTYPES
+        else stream_ingest_pdf_r2
+        if doc_type == DocumentType.PDF
+        else stream_ingest_office_r2
+        if doc_type in OFFICE_STREAMABLE_DOCTYPES
         else None
     )
 
@@ -674,8 +689,11 @@ async def ingest_r2(
             )
             try:
                 chunks = await _stream_fn(
-                    bucket=bucket, key=body.key, document=document,
-                    guardrails=body.guardrails or {}, pipeline=pipeline,
+                    bucket=bucket,
+                    key=body.key,
+                    document=document,
+                    guardrails=body.guardrails or {},
+                    pipeline=pipeline,
                 )
                 job.chunks_created = chunks
                 job.documents_processed = 1
@@ -759,7 +777,9 @@ class IngestApiRequest(BaseModel):
     webhook_url: Optional[str] = None
 
 
-async def _ingest_source_docs(kb_id: str, tenant_id: str, docs, label: str, webhook_url: Optional[str] = None) -> "JobStatusResponse":
+async def _ingest_source_docs(
+    kb_id: str, tenant_id: str, docs, label: str, webhook_url: Optional[str] = None
+) -> "JobStatusResponse":
     """Wrap (title, content, doc_type) tuples from a source adapter into Documents
     and enqueue the embed/index work on the bounded queue (returns 202/queued)."""
     if not docs:
@@ -771,11 +791,18 @@ async def _ingest_source_docs(kb_id: str, tenant_id: str, docs, label: str, webh
             dt = DocumentType(doc_type)
         except ValueError:
             dt = DocumentType.TEXT
-        documents.append(Document(
-            id=_stable_doc_id(label, kb_id, title, content), tenant_id=tenant_id, kb_id=kb_id,
-            content=content, title=title, source_url=None, doc_type=dt,
-            metadata={"source": label},
-        ))
+        documents.append(
+            Document(
+                id=_stable_doc_id(label, kb_id, title, content),
+                tenant_id=tenant_id,
+                kb_id=kb_id,
+                content=content,
+                title=title,
+                source_url=None,
+                doc_type=dt,
+                metadata={"source": label},
+            )
+        )
     _submit_to_queue(job, lambda: processor.process_job(job, documents))
     return _queued_job_response(job)
 
@@ -795,8 +822,11 @@ async def ingest_database(body: IngestDatabaseRequest, principal: Principal = De
     """Ingest rows/documents from a database via a read-only query."""
     try:
         docs = await read_database(
-            body.db_type, body.connection_uri, query=body.query,
-            collection=body.collection, limit=body.limit,
+            body.db_type,
+            body.connection_uri,
+            query=body.query,
+            collection=body.collection,
+            limit=body.limit,
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -808,8 +838,12 @@ async def ingest_api(body: IngestApiRequest, principal: Principal = Depends(requ
     """Ingest a REST API response (optionally a list via a dotted JSON path)."""
     try:
         docs = await read_api(
-            body.url, method=body.method, headers=body.headers, body=body.body,
-            json_path=body.json_path, limit=body.limit,
+            body.url,
+            method=body.method,
+            headers=body.headers,
+            body=body.body,
+            json_path=body.json_path,
+            limit=body.limit,
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -1021,7 +1055,9 @@ async def list_kb_chunks(
     """List the individual chunks (fragments) of a KB — for content curation."""
     try:
         chunks = await pipeline.vector_store.list_chunks(
-            tenant_id=principal.tenant_id, kb_id=kb_id, document_id=document_id,
+            tenant_id=principal.tenant_id,
+            kb_id=kb_id,
+            document_id=document_id,
         )
         return {"kb_id": kb_id, "chunks": chunks}
     except Exception as e:
@@ -1038,7 +1074,9 @@ async def delete_chunk(
     """Remove a single chunk (fragment) from a KB."""
     try:
         deleted = await pipeline.vector_store.delete_chunk(
-            tenant_id=principal.tenant_id, kb_id=kb_id, chunk_id=chunk_id,
+            tenant_id=principal.tenant_id,
+            kb_id=kb_id,
+            chunk_id=chunk_id,
         )
         return {"status": "deleted", "chunk_id": chunk_id, "chunks_deleted": deleted}
     except Exception as e:
@@ -1056,8 +1094,11 @@ async def update_chunk(
     try:
         embedding = await pipeline.embedding_client.embed_single(body.content)
         ok = await pipeline.vector_store.update_chunk(
-            tenant_id=principal.tenant_id, kb_id=body.kb_id, chunk_id=chunk_id,
-            content=body.content, embedding=embedding,
+            tenant_id=principal.tenant_id,
+            kb_id=body.kb_id,
+            chunk_id=chunk_id,
+            content=body.content,
+            embedding=embedding,
         )
         if not ok:
             raise HTTPException(status_code=404, detail="Chunk not found")
@@ -1075,6 +1116,7 @@ async def update_chunk(
 def find_free_port(start_port: int, max_retries: int = 100) -> int:
     """Find a free port starting from start_port"""
     import socket
+
     for port in range(start_port, start_port + max_retries):
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
             try:

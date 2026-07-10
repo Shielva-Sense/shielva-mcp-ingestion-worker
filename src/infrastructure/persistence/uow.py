@@ -1,11 +1,11 @@
-from __future__ import annotations
-
 """Simple coordinator for ingestion-worker.
 
 The ingestion worker does not use a relational DB for job state (jobs are
 held in-process by job_manager).  This UoW is a lightweight context manager
 placeholder for future persistence needs.
 """
+
+from __future__ import annotations
 
 from contextlib import asynccontextmanager
 from typing import AsyncGenerator
