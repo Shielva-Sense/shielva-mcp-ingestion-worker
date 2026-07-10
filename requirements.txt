@@ -2,6 +2,7 @@
 fastapi>=0.109.0
 uvicorn>=0.27.0
 pydantic>=2.5.0
+pydantic-settings>=2.1.0  # SealedSettings base (shielva_common.config.sealed) — used by the test import shim
 python-dotenv>=1.0.0
 
 # Embedding & LLM
