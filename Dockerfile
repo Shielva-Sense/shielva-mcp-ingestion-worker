@@ -8,9 +8,8 @@
 #   stage 2  runtime  Python 3.11-slim, non-root UID 1000, copies
 #                     /opt/venv + src/ + main.py + jobs/ + healthcheck.py.
 #
-# Build context:
+# Build context (this repo's root, post-monorepo-split):
 #
-#   cd shielva-mcp/shielva-mcp/ingestion-worker
 #   docker build -t shielva-mcp-ingestion-worker:dev .
 #
 # Hardening (SOC2 CC6.8):
@@ -53,9 +52,15 @@ RUN python -m venv "$VIRTUAL_ENV" \
 WORKDIR /build
 
 COPY requirements.txt ./requirements.txt
-RUN pip install -r requirements.txt \
-    && pip install \
-        "shielva-common @ git+https://github.com/Shielva-AI/shielva-platform-core@shielva-common-v1.2.1#subdirectory=shielva-common"
+# shielva-common is a private git dependency pinned in requirements.txt
+# (shielva-common-v1.2.1). Resolve it through a netrc backed by the
+# in-cluster builder's `id=github_token` secret so the private
+# Shielva-AI/shielva-platform-core clone authenticates.
+RUN --mount=type=secret,id=github_token \
+    printf 'machine github.com\n  login x-access-token\n  password %s\n' "$(cat /run/secrets/github_token)" > /root/.netrc \
+    && chmod 600 /root/.netrc \
+    && pip install -r requirements.txt \
+    && rm -f /root/.netrc
 
 # Sanity gate — fail the build if core imports cannot resolve.
 RUN python -c "import fastapi, uvicorn, structlog, httpx; import shielva_common; print('builder ok')"
