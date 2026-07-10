@@ -10,7 +10,7 @@ python-dotenv>=1.0.0
 # resolve `import shielva_common` — the smoke imports every src submodule before
 # pytest, so the real dep must be installable (conftest's sys.modules shim only
 # applies under pytest). Resolved via the CI git-auth token.
-shielva-common @ git+https://github.com/Shielva-AI/shielva-platform-core@shielva-common-v0.2.0#subdirectory=shielva-common
+shielva-common @ git+https://github.com/Shielva-AI/shielva-platform-core@shielva-common-v1.2.1#subdirectory=shielva-common
 
 # Embedding & LLM
 litellm>=1.10.0
