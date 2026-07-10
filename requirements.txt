@@ -5,6 +5,13 @@ pydantic>=2.5.0
 pydantic-settings>=2.1.0  # SealedSettings base (shielva_common.config.sealed) — used by the test import shim
 python-dotenv>=1.0.0
 
+# Private shared library (same pin as the Dockerfile). Declared here so the CI
+# test stage's strict `pip install -r requirements.txt` + import/boot smoke can
+# resolve `import shielva_common` — the smoke imports every src submodule before
+# pytest, so the real dep must be installable (conftest's sys.modules shim only
+# applies under pytest). Resolved via the CI git-auth token.
+shielva-common @ git+https://github.com/Shielva-AI/shielva-platform-core@shielva-common-v0.2.0#subdirectory=shielva-common
+
 # Embedding & LLM
 litellm>=1.10.0
 google-generativeai>=0.3.0
