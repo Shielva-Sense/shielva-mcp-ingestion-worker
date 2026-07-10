@@ -1,0 +1,8 @@
+# Self-hosted CI config for shielva-mcp-ingestion-worker.
+audit:
+  ignore:
+    # ecdsa PYSEC-2026-1325 (Minerva timing side-channel) — pulled in transitively
+    # via shielva-common -> python-jose[cryptography]. jose uses the `cryptography`
+    # backend for RS256 (our JWT alg), not pure-python ecdsa, so this side-channel
+    # is not on our verification path. No upstream fix. Accepted fleet-wide.
+    - ecdsa
