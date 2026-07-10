@@ -17,9 +17,7 @@ class IIngestionJobRepository(ABC):
     async def get(self, job_id: JobId, tenant_id: TenantId) -> Optional[IngestionJob]: ...
 
     @abstractmethod
-    async def list_by_tenant(
-        self, tenant_id: TenantId, status: Optional[str] = None
-    ) -> List[IngestionJob]: ...
+    async def list_by_tenant(self, tenant_id: TenantId, status: Optional[str] = None) -> List[IngestionJob]: ...
 
 
 class IVectorStore(ABC):

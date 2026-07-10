@@ -1,6 +1,7 @@
 """
 Ingestion Worker Data Models
 """
+
 from typing import Dict, Any, List, Optional
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -9,6 +10,7 @@ from enum import Enum
 
 class DocumentType(str, Enum):
     """Supported document types"""
+
     TEXT = "text"
     HTML = "html"
     MARKDOWN = "markdown"
@@ -22,6 +24,7 @@ class DocumentType(str, Enum):
 
 class ChunkingStrategy(str, Enum):
     """Document chunking strategies"""
+
     FIXED_SIZE = "fixed_size"
     SENTENCE = "sentence"
     PARAGRAPH = "paragraph"
@@ -32,6 +35,7 @@ class ChunkingStrategy(str, Enum):
 @dataclass
 class Document:
     """Document to be ingested"""
+
     id: str
     tenant_id: str
     kb_id: str
@@ -46,6 +50,7 @@ class Document:
 @dataclass
 class Chunk:
     """Document chunk with embedding"""
+
     id: str
     document_id: str
     content: str
@@ -59,6 +64,7 @@ class Chunk:
 @dataclass
 class IngestionJob:
     """Ingestion job status"""
+
     job_id: str
     tenant_id: str
     kb_id: str

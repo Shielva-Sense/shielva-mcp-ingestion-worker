@@ -1,6 +1,6 @@
-from __future__ import annotations
-
 """Adapter — wraps the existing SupabaseVectorStore behind the domain port."""
+
+from __future__ import annotations
 
 from typing import List
 

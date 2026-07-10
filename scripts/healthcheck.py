@@ -12,6 +12,7 @@ readinessProbe → /ready).
 Kept dependency-free — only stdlib — so the runtime image carries no
 extra wheels and so a broken httpx won't break the healthcheck.
 """
+
 from __future__ import annotations
 
 import os

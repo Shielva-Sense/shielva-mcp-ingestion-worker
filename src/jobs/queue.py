@@ -19,12 +19,13 @@ Ingestion is asynchronous: an HTTP request enqueues a job and returns 202 immedi
                      by the webhook round-trip. Dedicated notifier coroutines drain it
                      and deliver the response (webhook → core-api → SSE).
 """
+
 from __future__ import annotations
 
 import asyncio
 import os
 from datetime import datetime
-from typing import Awaitable, Callable, List, Optional, Set
+from typing import Awaitable, Callable, Dict, List, Optional, Set
 
 import structlog
 
@@ -101,9 +102,13 @@ class IngestQueue:
             self._notifiers.append(asyncio.create_task(self._notifier_loop(i), name=f"ingest-notifier-{i}"))
         logger.info(
             "ingest_queue_started",
-            initial_target=self._target, min=self._min, max=self._max,
-            waiting_max=self.waiting_max, cpus=self._cpus,
-            load_low=self._load_low, load_high=self._load_high,
+            initial_target=self._target,
+            min=self._min,
+            max=self._max,
+            waiting_max=self.waiting_max,
+            cpus=self._cpus,
+            load_low=self._load_low,
+            load_high=self._load_high,
         )
 
     async def stop(self) -> None:
@@ -138,8 +143,14 @@ class IngestQueue:
         self._active_jobs[job.job_id] = job
         job.status = "queued"
         waiting = self._queue.qsize()
-        logger.info("ingest_job_queued", job_id=job.job_id, kb_id=job.kb_id,
-                    waiting=waiting, active=len(self._inflight), target=self._target)
+        logger.info(
+            "ingest_job_queued",
+            job_id=job.job_id,
+            kb_id=job.kb_id,
+            waiting=waiting,
+            active=len(self._inflight),
+            target=self._target,
+        )
         return waiting
 
     # ── dispatcher: admit up to `target` concurrent jobs ────────────────
@@ -269,10 +280,17 @@ class IngestQueue:
 
             if reason is not None:
                 self._slot_freed.set()  # if we grew, let the dispatcher admit more now
-                logger.info("ingest_pool_scaled", **{
-                    "from": old, "to": self._target, "reason": reason,
-                    "load_ratio": round(ratio, 2), "waiting": waiting, "active": active,
-                })
+                logger.info(
+                    "ingest_pool_scaled",
+                    **{
+                        "from": old,
+                        "to": self._target,
+                        "reason": reason,
+                        "load_ratio": round(ratio, 2),
+                        "waiting": waiting,
+                        "active": active,
+                    },
+                )
 
     # ── completion / response delivery ──────────────────────────────────
     async def _notifier_loop(self, idx: int) -> None:
@@ -290,11 +308,11 @@ class IngestQueue:
     # ── introspection ───────────────────────────────────────────────────
     def stats(self) -> dict:
         return {
-            "target": self._target,            # current concurrency target (dynamic)
+            "target": self._target,  # current concurrency target (dynamic)
             "min": self._min,
             "max": self._max,
-            "active": len(self._inflight),     # jobs running right now
-            "waiting": self._queue.qsize(),    # backlog
+            "active": len(self._inflight),  # jobs running right now
+            "waiting": self._queue.qsize(),  # backlog
             "waiting_max": self.waiting_max,
             "completing": self._completion.qsize(),  # finished, awaiting delivery
             "notifiers": self._NOTIFIERS,

@@ -30,6 +30,7 @@ Robustness:
   • PDF temp file is always cleaned up; doc handle used sequentially (fitz isn't
     concurrency-safe, so page extraction is serialized through ``to_thread``).
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -53,8 +54,8 @@ STREAMABLE_DOCTYPES = {
     DocumentType.JSON,
 }
 
-_READ_WINDOW = 1024 * 1024          # 1 MiB byte windows pulled from R2
-_DEFAULT_EMBED_BATCH = 64           # chunks embedded+indexed per flush (bounds RAM)
+_READ_WINDOW = 1024 * 1024  # 1 MiB byte windows pulled from R2
+_DEFAULT_EMBED_BATCH = 64  # chunks embedded+indexed per flush (bounds RAM)
 
 
 class RollingChunker:
@@ -121,8 +122,7 @@ class _TextChunkIngestor:
     micro-batch embed+index → drop. Bounded memory. Produces rows identical to the
     normal pipeline."""
 
-    def __init__(self, *, document: Document, guardrails: Optional[Dict[str, Any]],
-                 pipeline: Any, embed_batch: int):
+    def __init__(self, *, document: Document, guardrails: Optional[Dict[str, Any]], pipeline: Any, embed_batch: int):
         self.document = document
         self.pipeline = pipeline
         self.embed_batch = max(1, int(embed_batch))
@@ -148,20 +148,24 @@ class _TextChunkIngestor:
         for c, emb in zip(self._batch, embeddings):
             c["embedding"] = emb
         await self.pipeline.indexer.index_chunks(
-            chunks=self._batch, tenant_id=self.document.tenant_id, kb_id=self.document.kb_id,
+            chunks=self._batch,
+            tenant_id=self.document.tenant_id,
+            kb_id=self.document.kb_id,
         )
         self.total += len(self._batch)
         self._batch = []
 
     async def _emit(self, idx: int, content: str) -> None:
-        self._batch.append({
-            "id": f"{self.document.id}_chunk_{idx}",
-            "document_id": self.document.id,
-            "content": content,
-            "embedding": None,
-            "metadata": dict(self.base_meta),
-            "chunk_index": idx,
-        })
+        self._batch.append(
+            {
+                "id": f"{self.document.id}_chunk_{idx}",
+                "document_id": self.document.id,
+                "content": content,
+                "embedding": None,
+                "metadata": dict(self.base_meta),
+                "chunk_index": idx,
+            }
+        )
         if len(self._batch) >= self.embed_batch:
             await self._flush()
 
@@ -181,14 +185,18 @@ class _TextChunkIngestor:
 
 
 async def stream_ingest_r2(
-    *, bucket: str, key: str, document: Document, guardrails: Optional[Dict[str, Any]],
-    pipeline: Any, embed_batch: int = _DEFAULT_EMBED_BATCH,
+    *,
+    bucket: str,
+    key: str,
+    document: Document,
+    guardrails: Optional[Dict[str, Any]],
+    pipeline: Any,
+    embed_batch: int = _DEFAULT_EMBED_BATCH,
 ) -> int:
     """Stream-ingest a TEXT-like R2 object. Constant RAM; never fully loads the file."""
     from src.fetcher import _r2_client
 
-    ing = _TextChunkIngestor(document=document, guardrails=guardrails,
-                             pipeline=pipeline, embed_batch=embed_batch)
+    ing = _TextChunkIngestor(document=document, guardrails=guardrails, pipeline=pipeline, embed_batch=embed_batch)
     decoder = codecs.getincrementaldecoder("utf-8")(errors="ignore")
 
     def _open_body():
@@ -215,8 +223,13 @@ async def stream_ingest_r2(
 
 
 async def stream_ingest_pdf_r2(
-    *, bucket: str, key: str, document: Document, guardrails: Optional[Dict[str, Any]],
-    pipeline: Any, embed_batch: int = _DEFAULT_EMBED_BATCH,
+    *,
+    bucket: str,
+    key: str,
+    document: Document,
+    guardrails: Optional[Dict[str, Any]],
+    pipeline: Any,
+    embed_batch: int = _DEFAULT_EMBED_BATCH,
 ) -> int:
     """Stream a PDF from R2 to a temp file (bytes on disk, not RAM), then ingest it ONE
     PAGE AT A TIME (fitz loads page content on demand). RAM stays flat (~one page of text
@@ -225,8 +238,7 @@ async def stream_ingest_pdf_r2(
     import tempfile
     from src.fetcher import _r2_client
 
-    ing = _TextChunkIngestor(document=document, guardrails=guardrails,
-                             pipeline=pipeline, embed_batch=embed_batch)
+    ing = _TextChunkIngestor(document=document, guardrails=guardrails, pipeline=pipeline, embed_batch=embed_batch)
 
     def _download_to_temp() -> str:
         body = _r2_client().get_object(Bucket=bucket, Key=key)["Body"]
@@ -249,6 +261,7 @@ async def stream_ingest_pdf_r2(
     doc = None
     try:
         import fitz  # PyMuPDF — same lib the normal PDF parser uses
+
         doc = await asyncio.to_thread(fitz.open, path)
         page_count = doc.page_count
         for i in range(page_count):
@@ -334,8 +347,13 @@ def _iter_xlsx_rows(path: str):
 
 
 async def stream_ingest_office_r2(
-    *, bucket: str, key: str, document: Document, guardrails: Optional[Dict[str, Any]],
-    pipeline: Any, embed_batch: int = _DEFAULT_EMBED_BATCH,
+    *,
+    bucket: str,
+    key: str,
+    document: Document,
+    guardrails: Optional[Dict[str, Any]],
+    pipeline: Any,
+    embed_batch: int = _DEFAULT_EMBED_BATCH,
 ) -> int:
     """Stream a DOCX/XLSX from R2 to a temp file (bytes on disk), then SAX/stream its XML
     one paragraph (docx) or row (xlsx) at a time → the shared chunk/embed/index core. RAM
@@ -344,8 +362,7 @@ async def stream_ingest_office_r2(
     import tempfile
     from src.fetcher import _r2_client
 
-    ing = _TextChunkIngestor(document=document, guardrails=guardrails,
-                             pipeline=pipeline, embed_batch=embed_batch)
+    ing = _TextChunkIngestor(document=document, guardrails=guardrails, pipeline=pipeline, embed_batch=embed_batch)
     is_xlsx = document.doc_type == DocumentType.XLSX
 
     def _download_to_temp(suffix: str) -> str:
@@ -377,8 +394,9 @@ async def stream_ingest_office_r2(
             for unit in units:
                 await ing.feed(unit)
         n = await ing.finalize()
-        log.info("stream_ingest_office_r2_done", kb_id=document.kb_id, key=key,
-                 kind="xlsx" if is_xlsx else "docx", chunks=n)
+        log.info(
+            "stream_ingest_office_r2_done", kb_id=document.kb_id, key=key, kind="xlsx" if is_xlsx else "docx", chunks=n
+        )
         return n
     finally:
         try:

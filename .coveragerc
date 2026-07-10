@@ -1,0 +1,21 @@
+[run]
+# relative_files lets Sonar map coverage paths regardless of the CI checkout dir.
+relative_files = True
+branch = False
+source =
+    src
+    main
+
+omit =
+    tests/*
+    scripts/*
+    jobs/worker.py
+    */__init__.py
+
+[report]
+show_missing = True
+skip_empty = True
+exclude_lines =
+    pragma: no cover
+    if __name__ == .__main__.:
+    raise NotImplementedError

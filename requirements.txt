@@ -30,6 +30,7 @@ structlog>=24.1.0
 # Development
 pytest>=7.4.0
 pytest-asyncio>=0.23.0
+pytest-cov>=4.1.0  # coverage.xml for the Sonar quality gate
 openpyxl>=3.1.0  # XLSX parsing
 python-pptx>=0.6.23  # PPTX parsing
 python-multipart>=0.0.6  # file uploads

@@ -3,9 +3,10 @@
 Embedding API keys + Supabase URI carry secrets — must come from envelope
 decryption, file-mount, or kwargs. No plaintext defaults.
 """
+
 import os
 from functools import lru_cache
-from typing import List, Optional
+from typing import List
 
 from pydantic import Field, SecretStr
 
@@ -48,14 +49,19 @@ class IngestionSettings(SealedSettings):
     # ── Embedding (SECRET — API keys) ───────────────────────────────────
     embedding_provider: str = Field("gemini", validation_alias="EMBEDDING_PROVIDER")
     embedding_model: str = Field(
-        "models/gemini-embedding-001", validation_alias="EMBEDDING_MODEL",
+        "models/gemini-embedding-001",
+        validation_alias="EMBEDDING_MODEL",
     )
     embedding_dimensions: int = Field(768, validation_alias="EMBEDDING_DIMENSIONS")
     gemini_api_key: SecretStr = sealed_field(
-        SecretStr(""), env="GEMINI_API_KEY", file_env="GEMINI_API_KEY_FILE",
+        SecretStr(""),
+        env="GEMINI_API_KEY",
+        file_env="GEMINI_API_KEY_FILE",
     )
     openai_api_key: SecretStr = sealed_field(
-        SecretStr(""), env="OPENAI_API_KEY", file_env="OPENAI_API_KEY_FILE",
+        SecretStr(""),
+        env="OPENAI_API_KEY",
+        file_env="OPENAI_API_KEY_FILE",
     )
 
     # ── Chunking (non-secret) ───────────────────────────────────────────
@@ -70,12 +76,14 @@ class IngestionSettings(SealedSettings):
         file_env="SUPABASE_DB_URL_FILE",
     )
     supabase_collection_prefix: str = Field(
-        "shielva_kb_", validation_alias="SUPABASE_COLLECTION_PREFIX",
+        "shielva_kb_",
+        validation_alias="SUPABASE_COLLECTION_PREFIX",
     )
 
     # ── Ingest payload caps (CC6.6 — bound blast radius) ────────────────
     max_entries_per_batch: int = Field(
-        100, validation_alias="INGEST_MAX_ENTRIES",
+        100,
+        validation_alias="INGEST_MAX_ENTRIES",
     )
     # Per-document cap for the DIRECT multipart path (/ingest/file, /ingest/sync).
     # The ARC UI routes files > 8 MB to the streaming R2 path (which is NOT byte-capped),
@@ -85,10 +93,12 @@ class IngestionSettings(SealedSettings):
     # 25 MB covers typical KB documents; large files still stream via R2. Override per
     # deployment with INGEST_MAX_DOC_BYTES / INGEST_MAX_TOTAL_BYTES.
     max_total_bytes_per_batch: int = Field(
-        50 * 1024 * 1024, validation_alias="INGEST_MAX_TOTAL_BYTES",
+        50 * 1024 * 1024,
+        validation_alias="INGEST_MAX_TOTAL_BYTES",
     )
     max_bytes_per_document: int = Field(
-        25 * 1024 * 1024, validation_alias="INGEST_MAX_DOC_BYTES",
+        25 * 1024 * 1024,
+        validation_alias="INGEST_MAX_DOC_BYTES",
     )
     # Per-tenant rate limit
     ingest_rps: float = Field(10.0, validation_alias="INGEST_RPS")
@@ -106,9 +116,11 @@ class IngestionSettings(SealedSettings):
     # below `load_low` when there's backlog, scale down above `load_high` (system-wide
     # load, so we yield to other VM processes too). All overridable; nothing hardcoded.
     ingest_min_concurrency: int = Field(1, validation_alias="INGEST_MIN_CONCURRENCY")
-    ingest_max_concurrency: int = Field(default_factory=_default_max_concurrency, validation_alias="INGEST_MAX_CONCURRENCY")
-    ingest_load_high: float = Field(1.0, validation_alias="INGEST_LOAD_HIGH")   # loadavg/core ≥ this → scale down
-    ingest_load_low: float = Field(0.7, validation_alias="INGEST_LOAD_LOW")     # loadavg/core < this → may scale up
+    ingest_max_concurrency: int = Field(
+        default_factory=_default_max_concurrency, validation_alias="INGEST_MAX_CONCURRENCY"
+    )
+    ingest_load_high: float = Field(1.0, validation_alias="INGEST_LOAD_HIGH")  # loadavg/core ≥ this → scale down
+    ingest_load_low: float = Field(0.7, validation_alias="INGEST_LOAD_LOW")  # loadavg/core < this → may scale up
     ingest_control_interval: float = Field(3.0, validation_alias="INGEST_CONTROL_INTERVAL")
 
     # ── Audit + principal HMAC (SECRET) ─────────────────────────────────
@@ -125,7 +137,9 @@ class IngestionSettings(SealedSettings):
 
     # ── Redis (SECRET) ──────────────────────────────────────────────────
     redis_url: SecretStr = sealed_field(
-        SecretStr(""), env="REDIS_URL", file_env="REDIS_URL_FILE",
+        SecretStr(""),
+        env="REDIS_URL",
+        file_env="REDIS_URL_FILE",
     )
 
     # ── Observability ────────────────────────────────────────────────────

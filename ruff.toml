@@ -1,0 +1,25 @@
+# Ruff config for the ingestion worker.
+# target-version pinned to the CI runtime (Python 3.11).
+target-version = "py311"
+line-length = 120
+
+extend-exclude = [
+    ".venv",
+    "venv",
+    "build",
+    "dist",
+]
+
+[lint]
+# Default rule set (pyflakes + a subset of pycodestyle) plus import hygiene.
+select = ["E4", "E7", "E9", "F"]
+
+[lint.per-file-ignores]
+# main.py MUST run the envelope-bootstrap (secret decryption) BEFORE any module
+# that reads settings/env is imported — so its imports are deliberately not all at
+# the top of the file. E402 is therefore expected and intentional here.
+"main.py" = ["E402"]
+# Package __init__ files intentionally re-export symbols for the public API.
+"**/__init__.py" = ["F401"]
+# Tests use fixtures/imports that ruff can't always see as "used".
+"tests/**" = ["F401", "F811"]
