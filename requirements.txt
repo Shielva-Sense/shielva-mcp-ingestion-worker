@@ -29,6 +29,11 @@ lxml>=5.0.0  # XML/HTML parsing
 # HTTP Client
 httpx>=0.26.0
 
+# Rate limiting — shielva_common.ratelimit.PerTenantTokenBucket needs redis.asyncio.
+# Without it, app.state.token_bucket stays None and every /ingest/* request raises
+# "PerTenantTokenBucket not configured" (500). REDIS_URL comes from shielva-config.
+redis>=5.0.0
+
 # Object storage (R2 / S3-compatible) — streaming fetch of direct-uploaded files
 boto3>=1.34.0
 
