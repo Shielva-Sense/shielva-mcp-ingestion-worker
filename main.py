@@ -840,9 +840,22 @@ def _source_fetch_error(url: str, exc: Exception) -> HTTPException:
                 ),
             )
         return HTTPException(status_code=400, detail=f"{host} returned HTTP {code} for that URL.")
+    if isinstance(exc, (httpx.RemoteProtocolError, httpx.ReadError, httpx.WriteError)):
+        # Connected, then the peer dropped us mid-conversation. Almost always a
+        # bot-mitigation tarpit rather than a bad URL — say so, so nobody wastes
+        # time re-checking a URL that is perfectly correct.
+        return HTTPException(
+            status_code=400,
+            detail=(
+                f"{host} closed the connection without responding. The site blocks "
+                f"automated access (its bot protection drops non-browser clients). "
+                f"Upload the content as a file instead, or use a source the publisher "
+                f"offers for machines (their API, RSS feed or sitemap)."
+            ),
+        )
     return HTTPException(
         status_code=400,
-        detail=f"Could not reach {host} ({type(exc).__name__}). Check the URL is public and correct.",
+        detail=f"Could not reach {host} ({type(exc).__name__}). Check the URL is public and reachable.",
     )
 
 
