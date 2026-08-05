@@ -44,6 +44,7 @@ from typing import Dict, Any, List, Optional
 from datetime import datetime
 from contextlib import asynccontextmanager
 import httpx
+from urllib.parse import urlparse
 import json
 import structlog
 import uvicorn
@@ -807,6 +808,43 @@ async def _ingest_source_docs(
     return _queued_job_response(job)
 
 
+def _source_fetch_error(url: str, exc: Exception) -> HTTPException:
+    """Turn an outbound fetch failure into a clear, actionable client error.
+
+    Only ``ValueError`` (the SSRF guard) used to be caught here, so every real
+    network failure — timeout, 403, DNS — escaped as a bare 500 with a traceback.
+    core-api then relayed "Ingestion enqueue failed: <traceback>" and the operator
+    saw an unexplained "Network Error". These map to 400 so core-api surfaces the
+    reason verbatim ("Source error: ..."), because they are all *input* problems:
+    the URL the user supplied cannot be fetched.
+    """
+    host = urlparse(url).hostname or url
+    if isinstance(exc, httpx.TimeoutException):
+        return HTTPException(
+            status_code=400,
+            detail=(
+                f"{host} did not respond in time. The site may be slow, or it may block "
+                f"automated access from servers (many large sites do). Try a different URL, "
+                f"or upload the content as a file instead."
+            ),
+        )
+    if isinstance(exc, httpx.HTTPStatusError):
+        code = exc.response.status_code
+        if code in (401, 403, 429):
+            return HTTPException(
+                status_code=400,
+                detail=(
+                    f"{host} refused the request (HTTP {code}) — the site blocks automated "
+                    f"access. Try a different URL, or upload the content as a file instead."
+                ),
+            )
+        return HTTPException(status_code=400, detail=f"{host} returned HTTP {code} for that URL.")
+    return HTTPException(
+        status_code=400,
+        detail=f"Could not reach {host} ({type(exc).__name__}). Check the URL is public and correct.",
+    )
+
+
 @app.post("/ingest/url", response_model=JobStatusResponse, dependencies=[Depends(_ingest_rate_limit)])
 async def ingest_url(body: IngestUrlRequest, principal: Principal = Depends(require_principal)):
     """Ingest a public URL — a single page, or a same-host BFS crawl. SSRF-guarded."""
@@ -814,6 +852,8 @@ async def ingest_url(body: IngestUrlRequest, principal: Principal = Depends(requ
         docs = await fetch_url(body.url, crawl=body.crawl, max_pages=body.max_pages, max_depth=body.max_depth)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    except httpx.HTTPError as e:
+        raise _source_fetch_error(body.url, e)
     return await _ingest_source_docs(body.kb_id, principal.tenant_id, docs, "url", body.webhook_url)
 
 
@@ -847,6 +887,8 @@ async def ingest_api(body: IngestApiRequest, principal: Principal = Depends(requ
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    except httpx.HTTPError as e:
+        raise _source_fetch_error(body.url, e)
     return await _ingest_source_docs(body.kb_id, principal.tenant_id, docs, "api", body.webhook_url)
 
 

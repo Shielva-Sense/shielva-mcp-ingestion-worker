@@ -95,6 +95,14 @@ def _assert_db_host(host: Optional[str]) -> None:
 
 
 # ── URL / crawl ──────────────────────────────────────────────────────────────
+# Outbound page fetches are user-facing (someone is waiting on "Add source"), so
+# fail fast rather than hanging: a healthy page answers well inside 10s. Sites that
+# block server/datacenter traffic (bot mitigation) simply never reply — without a
+# short read timeout that request hangs ~20s and the browser gives up first, which
+# surfaced as a meaningless "Network Error" instead of a real reason.
+_FETCH_TIMEOUT = httpx.Timeout(10.0, connect=5.0)
+
+
 async def fetch_url(
     url: str,
     *,
@@ -107,7 +115,7 @@ async def fetch_url(
     _assert_public_url(url)
     out: List[SourceDoc] = []
     if not crawl:
-        async with httpx.AsyncClient(timeout=20.0, follow_redirects=True) as client:
+        async with httpx.AsyncClient(timeout=_FETCH_TIMEOUT, follow_redirects=True) as client:
             r = await client.get(url, headers={"User-Agent": "ShielvaBot/1.0"})
             r.raise_for_status()
             out.append((url, r.text[:_MAX_DOC_CHARS], "html"))
@@ -118,7 +126,7 @@ async def fetch_url(
     base_host = urlparse(url).hostname
     seen: set = set()
     queue: List[Tuple[str, int]] = [(url, 0)]
-    async with httpx.AsyncClient(timeout=20.0, follow_redirects=True) as client:
+    async with httpx.AsyncClient(timeout=_FETCH_TIMEOUT, follow_redirects=True) as client:
         while queue and len(out) < max_pages:
             cur, depth = queue.pop(0)
             if cur in seen or depth > max_depth:
