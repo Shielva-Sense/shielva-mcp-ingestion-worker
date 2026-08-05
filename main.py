@@ -57,6 +57,7 @@ from src.config import get_settings
 import os  # noqa: E402 — plain os (the envelope alias above shadows the name)
 from src.pipeline import IngestionPipeline
 from src.sources import fetch_url, read_database, read_api
+from src.sources.politeness import RobotsDisallowed
 from src.models import (
     Document,
     DocumentType,
@@ -850,6 +851,10 @@ async def ingest_url(body: IngestUrlRequest, principal: Principal = Depends(requ
     """Ingest a public URL — a single page, or a same-host BFS crawl. SSRF-guarded."""
     try:
         docs = await fetch_url(body.url, crawl=body.crawl, max_pages=body.max_pages, max_depth=body.max_depth)
+    except RobotsDisallowed as e:
+        # The publisher declined automated access. Deliberately NOT retried or
+        # worked around — we honour robots.txt.
+        raise HTTPException(status_code=400, detail=str(e))
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except httpx.HTTPError as e:

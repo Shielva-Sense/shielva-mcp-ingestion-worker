@@ -23,6 +23,7 @@ import socket
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urljoin, urlparse
 
+import asyncio
 import httpx
 import structlog
 
@@ -102,6 +103,18 @@ def _assert_db_host(host: Optional[str]) -> None:
 # surfaced as a meaningless "Network Error" instead of a real reason.
 _FETCH_TIMEOUT = httpx.Timeout(10.0, connect=5.0)
 
+# Consent + honest identity live in politeness.py. HTTP/2 matters: a request
+# that claims to be a modern client but speaks HTTP/1.1 with no Accept-Language
+# is what most WAFs score as bot-like — speaking the protocol properly is what
+# gets compliant crawlers served (e.g. Wikipedia, whose robots.txt welcomes
+# "friendly, low-speed bots", answered us only once h2 + real headers were sent).
+from .politeness import (  # noqa: E402
+    BROWSER_HEADERS,
+    RobotsDisallowed,
+    assert_crawl_allowed,
+    crawl_delay,
+)
+
 
 async def fetch_url(
     url: str,
@@ -113,10 +126,13 @@ async def fetch_url(
     """Fetch a single public page, or BFS-crawl same-host pages when ``crawl``.
     Returns each page's raw HTML as an ``html`` doc (the pipeline parses it)."""
     _assert_public_url(url)
+    await assert_crawl_allowed(url)          # publisher consent (robots.txt)
     out: List[SourceDoc] = []
     if not crawl:
-        async with httpx.AsyncClient(timeout=_FETCH_TIMEOUT, follow_redirects=True) as client:
-            r = await client.get(url, headers={"User-Agent": "ShielvaBot/1.0"})
+        async with httpx.AsyncClient(
+            timeout=_FETCH_TIMEOUT, follow_redirects=True, http2=True
+        ) as client:
+            r = await client.get(url, headers=BROWSER_HEADERS)
             r.raise_for_status()
             out.append((url, r.text[:_MAX_DOC_CHARS], "html"))
         return out
@@ -126,7 +142,10 @@ async def fetch_url(
     base_host = urlparse(url).hostname
     seen: set = set()
     queue: List[Tuple[str, int]] = [(url, 0)]
-    async with httpx.AsyncClient(timeout=_FETCH_TIMEOUT, follow_redirects=True) as client:
+    delay = crawl_delay(url)   # 0.0 unless robots.txt asks us to slow down
+    async with httpx.AsyncClient(
+        timeout=_FETCH_TIMEOUT, follow_redirects=True, http2=True
+    ) as client:
         while queue and len(out) < max_pages:
             cur, depth = queue.pop(0)
             if cur in seen or depth > max_depth:
@@ -135,7 +154,16 @@ async def fetch_url(
             try:
                 if urlparse(cur).hostname != base_host or not _host_is_public(urlparse(cur).hostname or ""):
                     continue
-                r = await client.get(cur, headers={"User-Agent": "ShielvaBot/1.0"})
+                # Consent is per-URL: robots.txt commonly allows /docs but denies
+                # /search or /admin, so a crawl must re-check every page, not just
+                # the seed. A disallowed page is skipped, never fetched.
+                try:
+                    await assert_crawl_allowed(cur)
+                except RobotsDisallowed:
+                    continue
+                if delay:
+                    await asyncio.sleep(delay)   # publisher-requested Crawl-delay
+                r = await client.get(cur, headers=BROWSER_HEADERS)
                 if r.status_code != 200 or "text/html" not in r.headers.get("content-type", ""):
                     continue
                 out.append((cur, r.text[:_MAX_DOC_CHARS], "html"))
