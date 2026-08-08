@@ -130,7 +130,13 @@ class IngestResponse(BaseModel):
 
 
 class JobStatusResponse(BaseModel):
-    """Job status response"""
+    """Job status response.
+
+    ``status`` is the PIPELINE outcome; ``delivery_status`` is whether that
+    outcome reached the caller's ``webhook_url``. A job can be
+    ``status=completed, delivery_status=undelivered`` — the vectors are indexed
+    but nothing downstream was told, which is the state an operator needs to see.
+    """
 
     job_id: str
     status: str
@@ -141,6 +147,9 @@ class JobStatusResponse(BaseModel):
     started_at: Optional[datetime] = None
     completed_at: Optional[datetime] = None
     errors: List[str] = []
+    delivery_status: str = "pending"  # pending | delivered | undelivered | skipped
+    delivery_attempts: int = 0
+    delivery_error: Optional[str] = None
 
 
 class DeleteDocumentRequest(BaseModel):
@@ -251,6 +260,8 @@ async def lifespan(app: FastAPI):
         load_high=settings.ingest_load_high,
         load_low=settings.ingest_load_low,
         control_interval=settings.ingest_control_interval,
+        redelivery_interval=settings.webhook_redelivery_interval,
+        redelivery_max_age=settings.webhook_redelivery_max_age,
     )
     _ingest_queue_mod.ingest_queue.start()
 
@@ -361,7 +372,10 @@ def _submit_to_queue(job, run) -> None:
         raise HTTPException(status_code=429, detail=str(exc), headers={"Retry-After": "30"})
 
 
-def _queued_job_response(job) -> "JobStatusResponse":
+def _job_response(job) -> "JobStatusResponse":
+    """Sole IngestionJob → JobStatusResponse projection. Every endpoint that
+    returns job state goes through here, so a new field can't be surfaced on
+    one route and silently missing on the next."""
     return JobStatusResponse(
         job_id=job.job_id,
         status=job.status,
@@ -372,6 +386,9 @@ def _queued_job_response(job) -> "JobStatusResponse":
         started_at=job.started_at,
         completed_at=job.completed_at,
         errors=job.errors,
+        delivery_status=job.delivery_status,
+        delivery_attempts=job.delivery_attempts,
+        delivery_error=job.delivery_error,
     )
 
 
@@ -472,17 +489,10 @@ async def ingest_documents_sync(
 
     await processor.process_job(job, documents)
 
-    return JobStatusResponse(
-        job_id=job.job_id,
-        status=job.status,
-        documents_total=job.documents_total,
-        documents_processed=job.documents_processed,
-        documents_failed=job.documents_failed,
-        chunks_created=job.chunks_created,
-        started_at=job.started_at,
-        completed_at=job.completed_at,
-        errors=job.errors,
-    )
+    # Synchronous path: the response body IS the delivery, so there is no
+    # terminal webhook to chase and nothing can be stranded by a dropped one.
+    job.delivery_status = "skipped"
+    return _job_response(job)
 
 
 # Map an uploaded file's extension to its document type. Unknown → treated as text.
@@ -590,7 +600,7 @@ async def ingest_files(
     # Files are already read into memory above (the multipart body can't be read
     # after we respond), so enqueue the parse/chunk/embed/index work and return 202.
     _submit_to_queue(job, lambda: processor.process_job(job, documents))
-    return _queued_job_response(job)
+    return _job_response(job)
 
 
 class IngestR2Request(BaseModel):
@@ -746,7 +756,7 @@ async def ingest_r2(
         await processor.process_job(job, [document])
 
     _submit_to_queue(job, _run)
-    return _queued_job_response(job)
+    return _job_response(job)
 
 
 class IngestUrlRequest(BaseModel):
@@ -806,7 +816,7 @@ async def _ingest_source_docs(
             )
         )
     _submit_to_queue(job, lambda: processor.process_job(job, documents))
-    return _queued_job_response(job)
+    return _job_response(job)
 
 
 def _source_fetch_error(url: str, exc: Exception) -> HTTPException:
@@ -920,17 +930,7 @@ async def get_job_status(
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
 
-    return JobStatusResponse(
-        job_id=job.job_id,
-        status=job.status,
-        documents_total=job.documents_total,
-        documents_processed=job.documents_processed,
-        documents_failed=job.documents_failed,
-        chunks_created=job.chunks_created,
-        started_at=job.started_at,
-        completed_at=job.completed_at,
-        errors=job.errors,
-    )
+    return _job_response(job)
 
 
 @app.get("/jobs")
@@ -949,6 +949,7 @@ async def list_jobs(
             "documents_processed": job.documents_processed,
             "chunks_created": job.chunks_created,
             "started_at": job.started_at,
+            "delivery_status": job.delivery_status,
         }
         for job in jobs
     ]

@@ -81,3 +81,15 @@ class IngestionJob:
     completed_at: Optional[datetime] = None
     errors: List[str] = field(default_factory=list)
     webhook_url: Optional[str] = None
+    # Delivery of the TERMINAL result to `webhook_url`, tracked separately from
+    # `status`. The two really are independent outcomes: the pipeline can finish
+    # cleanly while its result never reaches core-api. Collapsing them into one
+    # enum would be wrong in both directions — it would report a KB as failed
+    # when its vectors are fine, and on redelivery it would hand core-api a
+    # status its callback doesn't map to a terminal KB state (so the KB would
+    # stay "ingesting" forever). A job is only truly done when status is
+    # terminal AND delivery_status is "delivered"/"skipped".
+    #   pending | delivered | undelivered | skipped (no webhook_url)
+    delivery_status: str = "pending"
+    delivery_attempts: int = 0
+    delivery_error: Optional[str] = None

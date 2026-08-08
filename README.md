@@ -102,6 +102,40 @@ Environment variables:
 | `OPENAI_API_KEY` | - | API key for embeddings |
 | `QDRANT_HOST` | localhost | Qdrant server host |
 | `QDRANT_PORT` | 6333 | Qdrant server port |
+| `INGEST_WEBHOOK_MAX_ATTEMPTS` | 4 | Inline attempts for the terminal callback |
+| `INGEST_WEBHOOK_BASE_DELAY` | 0.5 | First backoff delay (s), doubling |
+| `INGEST_WEBHOOK_MAX_DELAY` | 8.0 | Backoff ceiling (s) |
+| `INGEST_WEBHOOK_TIMEOUT` | 15.0 | Per-attempt HTTP timeout (s) |
+| `INGEST_WEBHOOK_REDELIVERY_INTERVAL` | 60.0 | Sweep interval for undelivered results (s) |
+| `INGEST_WEBHOOK_REDELIVERY_MAX_AGE` | 3600.0 | Give up on an undelivered result after (s) |
+
+## Result delivery
+
+An ingest job has **two** outcomes, and they can disagree:
+
+* `status` — the pipeline result (`completed` / `failed` / `cancelled`).
+* `delivery_status` — whether that result reached the caller's `webhook_url`
+  (`pending` / `delivered` / `undelivered` / `skipped`).
+
+The terminal callback is the only way a result reaches core-api — it never polls
+`/jobs/{job_id}` — so a dropped callback leaves the KB inconsistent with the
+vector store: `status=failed, chunks=None` in Mongo while the chunks are indexed
+and queryable. Delivery is therefore retried, not fired and forgotten:
+
+1. **Inline** — bounded exponential backoff on transport errors, 5xx and 429.
+   A 4xx (e.g. a bad callback token) is permanent and is not retried.
+2. **Redelivery sweep** — results that exhausted their inline attempts are held
+   and re-sent every `INGEST_WEBHOOK_REDELIVERY_INTERVAL` until
+   `INGEST_WEBHOOK_REDELIVERY_MAX_AGE`, so a core-api rollout heals itself
+   without anyone re-uploading.
+3. **Signal** — exhaustion logs `ingest_result_undelivered` at ERROR (and
+   `ingest_result_delivery_abandoned` when the sweep gives up). `GET /queue/stats`
+   exposes `undelivered`, `undelivered_total` and `abandoned_total`. Alert on the
+   ERROR events: a non-zero `undelivered` means KBs are inconsistent *right now*.
+
+Known gap: undelivered results live in process memory. A worker restart drops
+them (logged as `ingest_results_undelivered_at_shutdown`); surviving a restart
+needs a Redis-backed outbox.
 
 ## Quick Start
 
