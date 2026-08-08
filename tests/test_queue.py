@@ -194,3 +194,97 @@ async def test_double_start_is_idempotent():
     q.start()  # no-op
     assert q._dispatcher is d1
     await q.stop()
+
+
+# ── terminal-result delivery ─────────────────────────────────────────────────
+# A finished job whose callback never lands leaves core-api's KB inconsistent
+# with the vector store. The queue must hold on to it, not drop it.
+
+
+def _delivery_stub(outcomes):
+    """Replacement for deliver_result — pops the next True/False outcome."""
+    calls = []
+
+    async def _deliver(job):
+        calls.append(job.job_id)
+        ok = outcomes.pop(0) if outcomes else True
+        job.delivery_status = "delivered" if ok else "undelivered"
+        return ok
+
+    _deliver.calls = calls
+    return _deliver
+
+
+async def test_undelivered_result_is_parked_not_dropped(monkeypatch):
+    monkeypatch.setattr(queue_mod, "deliver_result", _delivery_stub([False]))
+    q = _make_queue(redelivery_interval=30)  # sweeper must not fire during the test
+    q.start()
+    job = _job("stranded")
+    q.submit(job, lambda: asyncio.sleep(0))
+    await _drain(0.2)
+
+    assert job.delivery_status == "undelivered"
+    stats = q.stats()
+    assert stats["undelivered"] == 1
+    assert stats["undelivered_total"] == 1
+    assert stats["delivered_total"] == 0
+    await q.stop()
+
+
+async def test_delivered_result_is_not_parked(monkeypatch):
+    monkeypatch.setattr(queue_mod, "deliver_result", _delivery_stub([True]))
+    q = _make_queue(redelivery_interval=30)
+    q.start()
+    q.submit(_job("clean"), lambda: asyncio.sleep(0))
+    await _drain(0.2)
+
+    stats = q.stats()
+    assert stats["undelivered"] == 0
+    assert stats["delivered_total"] == 1
+    await q.stop()
+
+
+async def test_redelivery_sweep_heals_a_stranded_result(monkeypatch):
+    # Fails on the completion path, succeeds on the sweep — a core-api rollout.
+    deliver = _delivery_stub([False, True])
+    monkeypatch.setattr(queue_mod, "deliver_result", deliver)
+    q = _make_queue(redelivery_interval=0.05)
+    q.start()
+    job = _job("heals")
+    q.submit(job, lambda: asyncio.sleep(0))
+    await _drain(0.4)
+
+    assert len(deliver.calls) >= 2  # retried without anyone re-uploading
+    assert job.delivery_status == "delivered"
+    assert q.stats()["undelivered"] == 0
+    await q.stop()
+
+
+async def test_redelivery_abandons_after_max_age(monkeypatch):
+    monkeypatch.setattr(queue_mod, "deliver_result", _delivery_stub([False, False, False]))
+    q = _make_queue(redelivery_interval=0.05, redelivery_max_age=0.0)  # instantly stale
+    q.start()
+    q.submit(_job("too-old"), lambda: asyncio.sleep(0))
+    await _drain(0.3)
+
+    stats = q.stats()
+    assert stats["undelivered"] == 0
+    assert stats["abandoned_total"] == 1
+    await q.stop()
+
+
+async def test_redelivery_keeps_original_failure_time(monkeypatch):
+    """Re-parking must not reset the age, or a permanently unreachable
+    receiver would keep the job alive forever."""
+    monkeypatch.setattr(queue_mod, "deliver_result", _delivery_stub([False, False]))
+    q = _make_queue(redelivery_interval=30)
+    q.start()
+    job = _job("keeps-age")
+    q.submit(job, lambda: asyncio.sleep(0))
+    await _drain(0.2)
+    first_failed_at = q._undelivered[job.job_id][1]
+
+    await q._deliver(job)  # a second failure
+    assert q._undelivered[job.job_id][1] == first_failed_at
+    assert q.stats()["undelivered_total"] == 1  # counted once, not per attempt
+    await q.stop()

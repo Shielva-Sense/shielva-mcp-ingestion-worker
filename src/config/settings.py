@@ -123,6 +123,20 @@ class IngestionSettings(SealedSettings):
     ingest_load_low: float = Field(0.7, validation_alias="INGEST_LOAD_LOW")  # loadavg/core < this → may scale up
     ingest_control_interval: float = Field(3.0, validation_alias="INGEST_CONTROL_INTERVAL")
 
+    # ── Completion-webhook delivery ─────────────────────────────────────
+    # The terminal webhook is the ONLY way an ingest result reaches core-api —
+    # core-api never polls /jobs/{id}. A dropped callback therefore leaves the KB
+    # stuck in a non-terminal state while the vectors are indexed and queryable,
+    # so delivery is retried rather than fired once and forgotten.
+    #   * inline retries cover a transient blip (a few seconds)
+    #   * the background redelivery sweep covers a core-api rollout (minutes)
+    webhook_max_attempts: int = Field(4, validation_alias="INGEST_WEBHOOK_MAX_ATTEMPTS")
+    webhook_base_delay: float = Field(0.5, validation_alias="INGEST_WEBHOOK_BASE_DELAY")
+    webhook_max_delay: float = Field(8.0, validation_alias="INGEST_WEBHOOK_MAX_DELAY")
+    webhook_timeout: float = Field(15.0, validation_alias="INGEST_WEBHOOK_TIMEOUT")
+    webhook_redelivery_interval: float = Field(60.0, validation_alias="INGEST_WEBHOOK_REDELIVERY_INTERVAL")
+    webhook_redelivery_max_age: float = Field(3600.0, validation_alias="INGEST_WEBHOOK_REDELIVERY_MAX_AGE")
+
     # ── Audit + principal HMAC (SECRET) ─────────────────────────────────
     audit_hmac_secret: SecretStr = sealed_field(
         ...,
