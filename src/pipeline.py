@@ -115,6 +115,21 @@ class IngestionPipeline:
             # Step 1.5: Clean
             document.content = TextCleaner.clean(document.content)
 
+            # 🚨 THE FORK. Extraction reads the document HERE — after parsing,
+            # before guardrails — and that order is the whole reason it is a
+            # fork rather than a later step.
+            #
+            # `apply_guardrails` below redacts email, phone, SSN and card
+            # before chunking, permanently, for everything downstream of it.
+            # Those four are the payload of KYC, invoices, loans and claims. A
+            # knowledge base is right to strip them; an extractor running after
+            # that would find [REDACTED_EMAIL] where the document says a name.
+            #
+            # Everything it produces is carried on the document's metadata and
+            # delivered by the caller, because this function owns one document
+            # and the delivery is a batch.
+            await self._extract_if_asked(document)
+
             # Step 1.6: Guardrails — redact PII / drop excluded lines BEFORE
             # chunking. Carried on the document's metadata by the ingest endpoint.
             _gr = (document.metadata or {}).pop("_guardrails", None)
@@ -169,6 +184,72 @@ class IngestionPipeline:
             logger.error("Document ingestion failed", document_id=document.id, error=str(e))
             raise
 
+    async def _extract_if_asked(self, document: Document) -> None:
+        """Read this document against a category, when the ingest asked for one.
+
+        Best-effort in the strictest sense: a failure here must never cost the
+        RAG ingest that shares this parse. The vectors are the feature that
+        already worked, and an extraction that raised would take the knowledge
+        base down with it — so the row records the failure and the chunking
+        below carries on.
+
+        The result rides on `document.metadata`, which `ingest_batch` reads.
+        Returning it would mean changing this method's contract (it returns a
+        chunk count) for a caller that does not want it.
+        """
+        spec = (document.metadata or {}).get("_extract")
+        if not spec:
+            return
+
+        from .extractor import extract_document
+        from .extractor.client import completer
+
+        try:
+            result = await extract_document(
+                text=document.content or "",
+                category_name=str(spec.get("category_name") or ""),
+                fields=list(spec.get("fields") or []),
+                complete=completer(document.tenant_id),
+            )
+        except Exception as exc:  # pragma: no cover — extract_document swallows its own
+            logger.warning("document_extract_unexpected", document_id=document.id, error=str(exc)[:200])
+            return
+
+        document.metadata["_extracted"] = {
+            "document_id": document.id,
+            "source_name": document.title or "",
+            "source_key": document.source_url or "",
+            "category_id": str(spec.get("category_id") or ""),
+            **result.as_payload(),
+        }
+
+    async def _deliver_extracted(
+        self, documents: List[Document], job: IngestionJob, rows: List[Dict[str, Any]]
+    ) -> None:
+        """Send the batch's extracted rows to core-api, which owns the store.
+
+        The callback URL and collect come off the first document's extract
+        spec — every document in one ingest belongs to one collect, because a
+        collect is what the ingest was started against.
+        """
+        if not rows:
+            return
+        spec = next((d.metadata.get("_extract") for d in documents if (d.metadata or {}).get("_extract")), None)
+        if not spec:
+            return
+
+        from .extractor.delivery import deliver_rows
+
+        try:
+            await deliver_rows(
+                callback_url=str(spec.get("rows_callback_url") or ""),
+                tenant_id=documents[0].tenant_id,
+                collect_id=str(spec.get("collect_id") or ""),
+                rows=rows,
+            )
+        except Exception as exc:  # pragma: no cover — deliver_rows swallows its own
+            logger.error("extracted_rows_delivery_crashed", job_id=job.job_id, error=str(exc)[:200])
+
     async def ingest_batch(
         self,
         documents: List[Document],
@@ -186,11 +267,20 @@ class IngestionPipeline:
 
         logger.info("Starting batch ingestion", job_id=job.job_id, total=len(documents))
 
+        # Rows the fork produced, delivered once at the end rather than per
+        # document: one request per invoice would be fifty round-trips for a
+        # batch that already knows it is a batch.
+        extracted: List[Dict[str, Any]] = []
+
         for document in documents:
             try:
                 chunks = await self.ingest_document(document)
                 job.documents_processed += 1
                 job.chunks_created += chunks
+
+                row = (document.metadata or {}).get("_extracted")
+                if row:
+                    extracted.append(row)
 
                 # Optional: trigger progress callback
                 if on_progress:
@@ -200,8 +290,18 @@ class IngestionPipeline:
                 job.documents_failed += 1
                 job.errors.append(f"{document.id}: {str(e)}")
 
+                # 🚨 A document whose CHUNKING failed may still have been read.
+                # Losing the extraction because the vectors failed would throw
+                # away the more expensive half of the work — and the half the
+                # reviewer is waiting for.
+                row = (document.metadata or {}).get("_extracted")
+                if row:
+                    extracted.append(row)
+
                 if on_progress:
                     await on_progress(job)
+
+        await self._deliver_extracted(documents, job, extracted)
 
         job.status = "completed"
         job.completed_at = datetime.utcnow()
