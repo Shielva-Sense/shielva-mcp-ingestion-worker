@@ -110,6 +110,14 @@ class IngestionPipeline:
             # their parser, and text formats arriving as bytes are decoded too.
             # TextParser is a no-op for str content, so the JSON-text path is safe.
             parser = PARSERS.get(document.doc_type, TextParser())
+            # 🚨 Kept for the scanned path, and ONLY as a local.
+            #
+            # The parse below replaces the bytes with text, and a scan's text is
+            # nothing — so reading its pages as images later needs the original.
+            # Never stashed on `document.metadata`: that metadata is copied onto
+            # every chunk and written to the vector store, which would put a
+            # base64 PDF into each pgvector row.
+            _raw = document.content if isinstance(document.content, (bytes, bytearray)) else b""
             document.content = await parser.parse(document.content)
 
             # Step 1.5: Clean
@@ -128,7 +136,7 @@ class IngestionPipeline:
             # Everything it produces is carried on the document's metadata and
             # delivered by the caller, because this function owns one document
             # and the delivery is a batch.
-            await self._extract_if_asked(document)
+            await self._extract_if_asked(document, raw_bytes=bytes(_raw))
 
             # Step 1.6: Guardrails — redact PII / drop excluded lines BEFORE
             # chunking. Carried on the document's metadata by the ingest endpoint.
@@ -184,7 +192,7 @@ class IngestionPipeline:
             logger.error("Document ingestion failed", document_id=document.id, error=str(e))
             raise
 
-    async def _extract_if_asked(self, document: Document) -> None:
+    async def _extract_if_asked(self, document, *, raw_bytes: bytes = b"") -> None:
         """Read this document against a category, when the ingest asked for one.
 
         Best-effort in the strictest sense: a failure here must never cost the
@@ -210,6 +218,9 @@ class IngestionPipeline:
                 category_name=str(spec.get("category_name") or ""),
                 fields=list(spec.get("fields") or []),
                 complete=completer(document.tenant_id),
+                # The document as it arrived. Used only when the parse found no
+                # text, so the pages can be rendered and read as images.
+                raw_bytes=raw_bytes,
             )
         except Exception as exc:  # pragma: no cover — extract_document swallows its own
             logger.warning("document_extract_unexpected", document_id=document.id, error=str(exc)[:200])

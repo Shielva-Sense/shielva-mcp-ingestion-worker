@@ -31,6 +31,11 @@ MAX_TOKENS = 1500
 #: gets before the row says it could not be read.
 TIMEOUT_S = 90.0
 
+#: Reading PICTURES of pages is slower than reading text, by enough that the
+#: text budget times out on a multi-page scan — which looks exactly like the
+#: model being unable to see, and would have been diagnosed as that.
+VISION_TIMEOUT_S = 180.0
+
 
 def _tls_verify() -> object:
     """The internal CA bundle, matching the rest of the worker's calls.
@@ -74,17 +79,39 @@ def completer(tenant_id: str):
     mcp_url = os.getenv("MCP_SERVICE_URL", "https://localhost:8004")
     headers = service_headers(tenant_id)
 
-    async def complete(prompt: str) -> str:
-        async with httpx.AsyncClient(verify=_tls_verify(), timeout=TIMEOUT_S) as client:
+    async def complete(prompt: str, images: list[str] | None = None) -> str:
+        """Ask the workspace's model. With `images`, ask it to READ them.
+
+        🚨 The images are sent as OpenAI content parts, which MCP accepts and
+        LiteLLM forwards to whichever provider the workspace has provisioned.
+        That is the entire scanned-page story: no OCR vendor, no second key, and
+        the usage lands on the metering that already exists because this is an
+        ordinary completion.
+        """
+        if images:
+            content: object = [
+                {"type": "text", "text": prompt},
+                *({"type": "image_url", "image_url": {"url": uri}} for uri in images),
+            ]
+        else:
+            content = prompt
+        async with httpx.AsyncClient(verify=_tls_verify(), timeout=VISION_TIMEOUT_S if images else TIMEOUT_S) as client:
             r = await client.post(
                 f"{mcp_url}/mcp/v1/llm/complete",
-                json={"messages": [{"role": "user", "content": prompt}], "max_tokens": MAX_TOKENS},
+                json={"messages": [{"role": "user", "content": content}], "max_tokens": MAX_TOKENS},
                 headers=headers,
             )
         if r.status_code != 200:
             # Raised, so `extract_document` turns it into a row that says the
             # document could not be read — one row, not a lost batch.
-            raise RuntimeError(f"model returned {r.status_code}")
+            #
+            # 🚨 The BODY travels with it for a vision call. A model that cannot
+            # see answers 400, and "model returned 400" cannot be told apart
+            # from a malformed request — the caller needs to know it was the
+            # modality, so the row can say the page is a scan the configured
+            # model cannot read.
+            detail = (r.text or "")[:300] if images else ""
+            raise RuntimeError(f"model returned {r.status_code}{': ' + detail if detail else ''}")
         return str(r.json().get("text") or "")
 
     return complete

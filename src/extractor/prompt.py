@@ -72,6 +72,40 @@ def build(*, category_name: str, fields: list[dict[str, Any]], text: str) -> str
     )
 
 
+def build_for_images(*, category_name: str, fields: list[dict[str, Any]], pages: int, truncated: bool) -> str:
+    """The same extraction prompt, for a document delivered as PAGE IMAGES.
+
+    🚨 Shares `build`'s rules by calling it, rather than restating them. Copy
+    them and the two drift: the copy-exactly rule, the never-guess rule and the
+    untrusted-content warning are the load-bearing parts of this prompt, and a
+    second version of them that silently loses one would produce invented values
+    from a scan — the hardest kind of wrong answer to notice, because a scan is
+    already expected to be imperfect.
+
+    The only difference is what the document IS, so only that sentence changes.
+    """
+    note = (
+        f"\n🚨 Only the first {pages} page(s) are attached; the document has more. "
+        "Record what these pages say and nothing about the rest."
+        if truncated
+        else ""
+    )
+    return build(
+        category_name=category_name,
+        fields=fields,
+        text=(
+            "The document is attached as "
+            f"{pages} page image(s) rather than as text, because it is a scan with no "
+            "text layer. Read the images.\n"
+            "🚨 Read only what is legible. A scan can be skewed, faint or cut off — a "
+            "value you cannot actually make out is ABSENT from your object, never a "
+            "best guess at what it probably says. Lower your confidence where the "
+            "print is unclear, so a reviewer knows which values to check against the "
+            "page." + note
+        ),
+    )
+
+
 def clip(text: str) -> tuple[str, bool]:
     """The document as much of it as fits, and whether anything was cut.
 

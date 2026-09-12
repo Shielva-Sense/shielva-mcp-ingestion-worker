@@ -618,6 +618,11 @@ class IngestR2Request(BaseModel):
     bucket: Optional[str] = None
     guardrails: Optional[Dict[str, Any]] = None
     webhook_url: Optional[str] = None
+    #: Read this document against a category as well as indexing it. Carries
+    #: the category's fields and a signed URL to send the extracted row back to
+    #: — the worker has no tenant session and can look up neither. Absent means
+    #: an ordinary RAG ingest, which is what every upload was before this.
+    extract: Optional[Dict[str, Any]] = None
 
 
 @app.post(
@@ -697,7 +702,16 @@ async def ingest_r2(
                 title=body.filename or "uploaded-file",
                 source_url=None,
                 doc_type=doc_type,
-                metadata={"upload": True, "filename": body.filename, "r2_key": body.key, "streamed": True},
+                metadata={
+                    "upload": True,
+                    "filename": body.filename,
+                    "r2_key": body.key,
+                    "streamed": True,
+                    # The pipeline's fork reads this after parsing. Only set
+                    # when the caller asked for extraction, so the fork is a
+                    # dict lookup that finds nothing on an ordinary ingest.
+                    **({"_extract": body.extract} if body.extract else {}),
+                },
             )
             try:
                 chunks = await _stream_fn(
@@ -751,6 +765,11 @@ async def ingest_r2(
                 "size": len(raw),
                 "r2_key": body.key,
                 "_guardrails": body.guardrails or {},
+                # 🚨 The BUFFERED branch needs this as much as the streaming
+                # one above. Setting it on only one means extraction works for
+                # large files and silently does nothing for small ones — a bug
+                # that looks like the model being unreliable.
+                **({"_extract": body.extract} if body.extract else {}),
             },
         )
         await processor.process_job(job, [document])
