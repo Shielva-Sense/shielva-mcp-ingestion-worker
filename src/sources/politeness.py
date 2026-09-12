@@ -22,6 +22,7 @@ as malformed-looking traffic, so speaking the modern protocol correctly is what
 gets Wikipedia (whose robots.txt explicitly welcomes "friendly, low-speed bots")
 to answer us at all.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -40,9 +41,7 @@ BOT_NAME = "ShielvaBot"
 BOT_VERSION = "1.0"
 BOT_INFO_URL = "https://shielva.ai/bot"
 BOT_CONTACT = "support@shielva.ai"
-USER_AGENT = (
-    f"{BOT_NAME}/{BOT_VERSION} (+{BOT_INFO_URL}; {BOT_CONTACT}) httpx"
-)
+USER_AGENT = f"{BOT_NAME}/{BOT_VERSION} (+{BOT_INFO_URL}; {BOT_CONTACT}) httpx"
 
 # A real client sends more than a UA. Sending only a UA over HTTP/1.1 is what
 # most WAFs score as "not a browser and not a well-behaved bot".
@@ -85,9 +84,7 @@ async def _load_robots(origin: str) -> Optional[RobotFileParser]:
 
         parser: Optional[RobotFileParser] = None
         try:
-            async with httpx.AsyncClient(
-                timeout=_ROBOTS_TIMEOUT, follow_redirects=True, http2=True
-            ) as client:
+            async with httpx.AsyncClient(timeout=_ROBOTS_TIMEOUT, follow_redirects=True, http2=True) as client:
                 resp = await client.get(f"{origin}/robots.txt", headers=BROWSER_HEADERS)
             if resp.status_code == 200 and resp.text.strip():
                 parser = RobotFileParser()

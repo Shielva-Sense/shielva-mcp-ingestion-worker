@@ -126,12 +126,10 @@ async def fetch_url(
     """Fetch a single public page, or BFS-crawl same-host pages when ``crawl``.
     Returns each page's raw HTML as an ``html`` doc (the pipeline parses it)."""
     _assert_public_url(url)
-    await assert_crawl_allowed(url)          # publisher consent (robots.txt)
+    await assert_crawl_allowed(url)  # publisher consent (robots.txt)
     out: List[SourceDoc] = []
     if not crawl:
-        async with httpx.AsyncClient(
-            timeout=_FETCH_TIMEOUT, follow_redirects=True, http2=True
-        ) as client:
+        async with httpx.AsyncClient(timeout=_FETCH_TIMEOUT, follow_redirects=True, http2=True) as client:
             r = await client.get(url, headers=BROWSER_HEADERS)
             r.raise_for_status()
             out.append((url, r.text[:_MAX_DOC_CHARS], "html"))
@@ -142,10 +140,8 @@ async def fetch_url(
     base_host = urlparse(url).hostname
     seen: set = set()
     queue: List[Tuple[str, int]] = [(url, 0)]
-    delay = crawl_delay(url)   # 0.0 unless robots.txt asks us to slow down
-    async with httpx.AsyncClient(
-        timeout=_FETCH_TIMEOUT, follow_redirects=True, http2=True
-    ) as client:
+    delay = crawl_delay(url)  # 0.0 unless robots.txt asks us to slow down
+    async with httpx.AsyncClient(timeout=_FETCH_TIMEOUT, follow_redirects=True, http2=True) as client:
         while queue and len(out) < max_pages:
             cur, depth = queue.pop(0)
             if cur in seen or depth > max_depth:
@@ -162,7 +158,7 @@ async def fetch_url(
                 except RobotsDisallowed:
                     continue
                 if delay:
-                    await asyncio.sleep(delay)   # publisher-requested Crawl-delay
+                    await asyncio.sleep(delay)  # publisher-requested Crawl-delay
                 r = await client.get(cur, headers=BROWSER_HEADERS)
                 if r.status_code != 200 or "text/html" not in r.headers.get("content-type", ""):
                     continue
