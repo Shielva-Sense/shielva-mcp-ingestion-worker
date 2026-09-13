@@ -55,6 +55,13 @@ STREAMABLE_DOCTYPES = {
 }
 
 _READ_WINDOW = 1024 * 1024  # 1 MiB byte windows pulled from R2
+#: How much of a streamed PDF is kept for field extraction.
+#:
+#: The extractor clips to roughly this anyway, so holding more would be RAM spent
+#: on text that is discarded one function later — and this path's whole purpose is
+#: that a thousand-page PDF costs the same as a one-page one.
+_EXTRACT_TEXT_CAP = 60_000
+
 _DEFAULT_EMBED_BATCH = 64  # chunks embedded+indexed per flush (bounds RAM)
 
 
@@ -264,13 +271,41 @@ async def stream_ingest_pdf_r2(
 
         doc = await asyncio.to_thread(fitz.open, path)
         page_count = doc.page_count
+        # 🚨 The document's own text, kept ONLY when extraction was asked for.
+        #
+        # This path exists to keep RAM flat for a thousand-page PDF, so it holds
+        # no whole document by design — and that is exactly why field extraction
+        # never ran for anything uploaded through R2. The spec arrived on the
+        # metadata, the pipeline's fork read it, and a PDF never reached the
+        # pipeline: it comes here instead. Bounded by the same clip the extractor
+        # applies anyway, so the flat-RAM promise survives.
+        wants_extract = bool((document.metadata or {}).get("_extract"))
+        seen: list[str] = []
+        seen_chars = 0
         for i in range(page_count):
             # fitz isn't concurrency-safe — extract pages serially off the event loop.
             text = await asyncio.to_thread(lambda idx=i: doc.load_page(idx).get_text("text") or "")
             if text:
                 await ing.feed(text + "\n")  # page boundary = newline (guardrail line safety)
+                if wants_extract and seen_chars < _EXTRACT_TEXT_CAP:
+                    seen.append(text)
+                    seen_chars += len(text)
         n = await ing.finalize()
         log.info("stream_ingest_pdf_r2_done", kb_id=document.kb_id, key=key, pages=page_count, chunks=n)
+
+        if wants_extract:
+            # 🚨 The RAW BYTES go with it. A scan has no text layer at all — this
+            # loop collects nothing for it — and reading one means rendering the
+            # page and showing it to the model. The file is already on disk here;
+            # re-fetching it from R2 to do that would double the transfer.
+            document.content = "\n".join(seen)
+            raw = await asyncio.to_thread(lambda: open(path, "rb").read()) if not seen else b""
+            if not seen:
+                # Only a scan needs the bytes, and only then is it worth the RAM.
+                await pipeline._extract_if_asked(document, raw_bytes=raw)
+            else:
+                await pipeline._extract_if_asked(document)
+            await pipeline._deliver_extracted([document])
         return n
     finally:
         if doc is not None:
