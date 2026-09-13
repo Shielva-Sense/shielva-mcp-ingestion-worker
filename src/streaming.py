@@ -199,6 +199,7 @@ async def stream_ingest_r2(
     guardrails: Optional[Dict[str, Any]],
     pipeline: Any,
     embed_batch: int = _DEFAULT_EMBED_BATCH,
+    job: Any = None,
 ) -> int:
     """Stream-ingest a TEXT-like R2 object. Constant RAM; never fully loads the file."""
     from src.fetcher import _r2_client
@@ -237,6 +238,7 @@ async def stream_ingest_pdf_r2(
     guardrails: Optional[Dict[str, Any]],
     pipeline: Any,
     embed_batch: int = _DEFAULT_EMBED_BATCH,
+    job: Any = None,
 ) -> int:
     """Stream a PDF from R2 to a temp file (bytes on disk, not RAM), then ingest it ONE
     PAGE AT A TIME (fitz loads page content on demand). RAM stays flat (~one page of text
@@ -294,18 +296,19 @@ async def stream_ingest_pdf_r2(
         log.info("stream_ingest_pdf_r2_done", kb_id=document.kb_id, key=key, pages=page_count, chunks=n)
 
         if wants_extract:
-            # 🚨 The RAW BYTES go with it. A scan has no text layer at all — this
-            # loop collects nothing for it — and reading one means rendering the
-            # page and showing it to the model. The file is already on disk here;
-            # re-fetching it from R2 to do that would double the transfer.
+            # 🚨 The RAW BYTES go with it when the pages carried no text. A scan
+            # has no text layer at all — this loop collects nothing for it — and
+            # reading one means rendering the page for the model. The file is
+            # already on disk here; re-fetching it from R2 would double the
+            # transfer for exactly the documents that are largest.
             document.content = "\n".join(seen)
-            raw = await asyncio.to_thread(lambda: open(path, "rb").read()) if not seen else b""
-            if not seen:
-                # Only a scan needs the bytes, and only then is it worth the RAM.
-                await pipeline._extract_if_asked(document, raw_bytes=raw)
-            else:
-                await pipeline._extract_if_asked(document)
-            await pipeline._deliver_extracted([document])
+            raw = b"" if seen else await asyncio.to_thread(lambda: open(path, "rb").read())
+            await pipeline._extract_if_asked(document, raw_bytes=raw)
+            # Delivered through the pipeline's OWN sender, not a second copy of
+            # it: that is where the retry, the batch size and the "these rows are
+            # gone" log line live.
+            row = (document.metadata or {}).get("_extracted")
+            await pipeline._deliver_extracted([document], job, [row] if row else [])
         return n
     finally:
         if doc is not None:
@@ -389,6 +392,7 @@ async def stream_ingest_office_r2(
     guardrails: Optional[Dict[str, Any]],
     pipeline: Any,
     embed_batch: int = _DEFAULT_EMBED_BATCH,
+    job: Any = None,
 ) -> int:
     """Stream a DOCX/XLSX from R2 to a temp file (bytes on disk), then SAX/stream its XML
     one paragraph (docx) or row (xlsx) at a time → the shared chunk/embed/index core. RAM

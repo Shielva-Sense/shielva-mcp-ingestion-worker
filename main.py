@@ -720,6 +720,9 @@ async def ingest_r2(
                     document=document,
                     guardrails=body.guardrails or {},
                     pipeline=pipeline,
+                    # Carried so a failed row delivery can name the job it came
+                    # from — the only thing the delivery path asks of it.
+                    job=job,
                 )
                 job.chunks_created = chunks
                 job.documents_processed = 1
@@ -1022,6 +1025,71 @@ async def initialize_kb(
     except Exception as e:
         logger.error("KB initialization failed", error=str(e))
         raise HTTPException(status_code=500, detail=str(e))
+
+
+class CloneKBRequest(BaseModel):
+    """Where a KB's vectors are being copied TO.
+
+    Named target_tenant_id rather than tenant_id on purpose: require_principal
+    rejects a body whose ``tenant_id`` disagrees with the caller's principal
+    (PrincipalTenantMismatchError), which is exactly the isolation rule that
+    makes every other route safe — and exactly what a deliberate cross-tenant
+    copy would trip.
+    """
+
+    target_tenant_id: str
+    target_kb_id: str
+
+
+@app.post("/kb/{kb_id}/clone")
+async def clone_kb(
+    kb_id: str,
+    body: CloneKBRequest,
+    principal: Principal = Depends(require_principal),
+):
+    """Copy this KB's vectors into another tenant's KB.
+
+    Exists so a bot built in one workspace can be deployed into a customer's
+    with its knowledge intact. Both collections are written by the same
+    embedding model at the same dimension, so the rows transfer verbatim — the
+    copy costs one INSERT ... SELECT instead of re-embedding the corpus, and it
+    reproduces the knowledge exactly, which re-ingesting a URL that has since
+    changed would not.
+
+    SERVICE PRINCIPALS ONLY. Every other route here is confined to the caller's
+    own tenant; this one writes into a different one by design, so it is
+    restricted to an internal service identity. A user-authenticated caller
+    reaching it would be a tenant-isolation hole, not a feature.
+    """
+    if principal.auth_method != "service":
+        raise HTTPException(status_code=403, detail="cross-tenant clone requires a service principal")
+
+    if not body.target_tenant_id or not body.target_kb_id:
+        raise HTTPException(status_code=400, detail="target_tenant_id and target_kb_id are required")
+
+    try:
+        rows = await pipeline.vector_store.clone_collection(
+            source_tenant_id=principal.tenant_id,
+            source_kb_id=kb_id,
+            target_tenant_id=body.target_tenant_id,
+            target_kb_id=body.target_kb_id,
+        )
+    except ValueError as e:
+        # Same-collection, or a target that already holds rows — a caller error,
+        # not a server fault, and worth saying plainly so a failed deploy is not
+        # mistaken for an outage.
+        raise HTTPException(status_code=409, detail=str(e)) from e
+    except Exception as e:
+        logger.error("KB clone failed", error=str(e), kb_id=kb_id)
+        raise HTTPException(status_code=500, detail=str(e)) from e
+
+    return {
+        "status": "cloned",
+        "source_kb_id": kb_id,
+        "target_kb_id": body.target_kb_id,
+        "target_tenant_id": body.target_tenant_id,
+        "rows": rows,
+    }
 
 
 @app.delete("/kb/{kb_id}")
