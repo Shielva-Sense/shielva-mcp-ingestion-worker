@@ -13,6 +13,7 @@ provider.
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 import structlog
@@ -21,7 +22,11 @@ from . import mapping, pages, prompt
 
 logger = structlog.get_logger(__name__)
 
-__all__ = ["ExtractionResult", "extract_document", "mapping", "pages", "prompt"]
+__all__ = ["BLIND", "RETRY", "UNREADABLE", "ExtractionResult", "extract_document", "mapping", "pages", "prompt"]
+
+RETRY = "retry"
+BLIND = "blind"
+UNREADABLE = "unreadable"
 
 
 class ExtractionResult:
@@ -33,7 +38,7 @@ class ExtractionResult:
     batch and tells a recruiter nothing about which file was the problem.
     """
 
-    __slots__ = ("failure", "note", "unmapped", "values")
+    __slots__ = ("failure", "note", "reason", "unmapped", "values")
 
     def __init__(
         self,
@@ -42,6 +47,7 @@ class ExtractionResult:
         unmapped: dict[str, Any] | None = None,
         failure: str = "",
         note: str = "",
+        reason: str = "",
     ) -> None:
         self.values = values or {}
         self.unmapped = unmapped or {}
@@ -49,6 +55,12 @@ class ExtractionResult:
         self.failure = failure
         #: A caveat about an otherwise usable row — a truncated document.
         self.note = note
+        #: WHY it failed, for a caller that must act on it rather than show it:
+        #: `RETRY` (the model call failed — try again later), `BLIND` (the
+        #: workspace's model cannot read images), `UNREADABLE` (it looked and
+        #: nothing was legible). Empty on success. Not part of `as_payload`: the
+        #: rows callback contract is unchanged.
+        self.reason = reason
 
     @property
     def ok(self) -> bool:
@@ -121,14 +133,12 @@ async def extract_document(
         # The row says the reading failed, and the batch continues. A model
         # outage must cost the documents it touched, not the whole run.
         logger.warning("document_extraction_failed", error=str(exc)[:200])
-        return ExtractionResult(failure="This document could not be read just now. Try it again.")
+        return ExtractionResult(failure="This document could not be read just now. Try it again.", reason=RETRY)
 
     found = mapping.parse_model_json(raw)
     if not found:
         logger.info("document_extraction_empty")
-        return ExtractionResult(
-            failure="Nothing could be read from this document.",
-        )
+        return ExtractionResult(failure="Nothing could be read from this document.", reason=UNREADABLE)
 
     split = mapping.map_to_category(found, [str(f.get("key") or "") for f in fields])
     return ExtractionResult(
@@ -158,12 +168,14 @@ async def _extract_from_images(
     complete,
 ) -> ExtractionResult:
     """Read a scan by rendering its pages and asking the model to look."""
-    images, truncated = pages.render(raw_bytes)
+    # Off the event loop: rendering is CPU work, and a multi-page scan would
+    # otherwise stall every other request the worker is serving meanwhile.
+    images, truncated = await asyncio.to_thread(pages.render, raw_bytes)
     if not images:
         # Not a PDF, encrypted, corrupt, or the bytes were never kept. The
         # original message is right for all of those: there was nothing to read
         # and nothing to render.
-        return ExtractionResult(failure=mapping.SCANNED_MESSAGE)
+        return ExtractionResult(failure=mapping.SCANNED_MESSAGE, reason=UNREADABLE)
 
     try:
         raw = await complete(
@@ -179,16 +191,18 @@ async def _extract_from_images(
         detail = str(exc)[:300]
         if _reads_as_cannot_see(detail):
             logger.info("document_vision_unsupported", error=detail)
-            return ExtractionResult(failure=VISION_UNAVAILABLE)
+            return ExtractionResult(failure=VISION_UNAVAILABLE, reason=BLIND)
         logger.warning("document_vision_failed", error=detail)
-        return ExtractionResult(failure="This document could not be read just now. Try it again.")
+        return ExtractionResult(failure="This document could not be read just now. Try it again.", reason=RETRY)
 
     found = mapping.parse_model_json(raw)
     if not found:
         # The model looked and reported nothing. Distinct from a failure: a
         # blank or illegible scan is a real outcome, and saying so is honest.
         logger.info("document_vision_empty", pages=len(images))
-        return ExtractionResult(failure="Nothing could be read from the scanned pages of this document.")
+        return ExtractionResult(
+            failure="Nothing could be read from the scanned pages of this document.", reason=UNREADABLE
+        )
 
     split = mapping.map_to_category(found, [str(f.get("key") or "") for f in fields])
     return ExtractionResult(
