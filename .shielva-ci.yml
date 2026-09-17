@@ -6,3 +6,11 @@ audit:
     # backend for RS256 (our JWT alg), not pure-python ecdsa, so this side-channel
     # is not on our verification path. No upstream fix. Accepted fleet-wide.
     - ecdsa
+    # setuptools 79.x PYSEC-2026-3447 / CVE-2026-59890 (fix: 83.0.0) — transitive:
+    # shielva-common pins setuptools>=68,<80 because the OpenTelemetry
+    # instrumentation imports pkg_resources, which setuptools 81+ removed, so the
+    # fix is blocked until that dependency drops pkg_resources. The vulnerable
+    # package_index / easy_install download machinery is never invoked at runtime
+    # by this worker. Accepted by package name until shielva-common lifts the pin,
+    # matching shielva-api and shielva-presence. Owner-approved 2026-09-17.
+    - setuptools

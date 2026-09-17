@@ -104,6 +104,16 @@ class IngestionSettings(SealedSettings):
     ingest_rps: float = Field(10.0, validation_alias="INGEST_RPS")
     ingest_burst: float = Field(20.0, validation_alias="INGEST_BURST")
 
+    # ── Extract-only (POST /extract) ─────────────────────────────────────
+    # One PDF read against a field list, nothing stored or indexed. The bytes
+    # are held in memory for the length of the request, so the cap is lower than
+    # the ingest caps; the page cap bounds parse and render time per request.
+    extract_max_bytes: int = Field(10 * 1024 * 1024, validation_alias="EXTRACT_MAX_BYTES")
+    extract_max_pages: int = Field(20, validation_alias="EXTRACT_MAX_PAGES")
+    # A vision read costs far more than an ingest request, so its own bucket.
+    extract_rps: float = Field(1.0, validation_alias="EXTRACT_RPS")
+    extract_burst: float = Field(5.0, validation_alias="EXTRACT_BURST")
+
     # ── Async ingest queue (bounded executor) ───────────────────────────
     # Jobs run on a fixed pool of workers (the "work queue" = active slots)
     # draining a bounded waiting queue. A burst of ingests queues instead of

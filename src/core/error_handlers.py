@@ -15,11 +15,12 @@ def _err(
     msg: str,
     detail: str | None = None,
     retryable: bool = False,
+    headers: dict[str, str] | None = None,
 ) -> JSONResponse:
     body: dict = {"error": {"code": code, "message": msg, "retryable": retryable}}
     if detail:
         body["error"]["detail"] = detail
-    return JSONResponse(status_code=status, content=body)
+    return JSONResponse(status_code=status, content=body, headers=headers)
 
 
 def install_exception_handlers(app: FastAPI) -> None:
@@ -38,7 +39,17 @@ def install_exception_handlers(app: FastAPI) -> None:
     @app.exception_handler(StarletteHTTPException)
     async def _http(req, exc: StarletteHTTPException) -> JSONResponse:
         logger.info("http_exception", status_code=exc.status_code, path=req.url.path)
-        return _err(exc.status_code, "HTTP_ERROR", str(exc.detail))
+        # 🚨 The exception's HEADERS travel with it. Dropping them silently lost
+        # every Retry-After this service sets (the ingest queue's 429, the
+        # extract endpoint's 503), so a well-behaved caller had nothing to back
+        # off by. A 429 or 503 is, by definition, worth retrying.
+        return _err(
+            exc.status_code,
+            "HTTP_ERROR",
+            str(exc.detail),
+            retryable=exc.status_code in (429, 503),
+            headers=getattr(exc, "headers", None),
+        )
 
     @app.exception_handler(RequestValidationError)
     async def _validation(req, exc: RequestValidationError) -> JSONResponse:

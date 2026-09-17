@@ -781,6 +781,55 @@ async def ingest_r2(
     return _job_response(job)
 
 
+_extract_rate_limit = per_tenant_rate_limit(
+    "mcp_extract",
+    rps=_ingest_settings.extract_rps,
+    burst=_ingest_settings.extract_burst,
+)
+
+
+@app.post("/extract", dependencies=[Depends(_extract_rate_limit)])
+async def extract_only(
+    file: UploadFile = File(...),
+    category_name: str = Form(...),
+    fields: str = Form(...),
+    principal: Principal = Depends(require_principal),
+):
+    """Read one PDF against a field list and return the fields. Nothing is kept.
+
+    For documents that must never be indexed or stored in the clear (identity
+    documents, statements). The tenant is the verified principal — it decides
+    whose model reads the pages and who is billed. See src/extractor/standalone.py.
+
+    200 → {status: read|unreadable|unsupported, pages, values, unmapped, failure, note}
+    400 bad field spec · 413 too large / too many pages · 415 not a readable PDF
+    503 the model call failed — retry later
+    """
+    from src.extractor.client import completer
+    from src.extractor.standalone import ExtractRejected, ModelUnavailable, parse_fields, read_pdf
+
+    caps = get_settings()
+    # One byte past the cap is enough to know it is too big; never read the rest.
+    raw = await file.read(caps.extract_max_bytes + 1)
+    try:
+        spec = parse_fields(fields)
+        return await read_pdf(
+            raw,
+            category_name=category_name,
+            fields=spec,
+            complete=completer(principal.tenant_id),
+            max_bytes=caps.extract_max_bytes,
+            max_pages=caps.extract_max_pages,
+        )
+    except ExtractRejected as exc:
+        raise HTTPException(status_code=exc.status, detail=str(exc))
+    except ModelUnavailable:
+        logger.warning("document_extract_only_model_unavailable", tenant_id=principal.tenant_id)
+        raise HTTPException(
+            status_code=503, detail="The model could not read the document just now", headers={"Retry-After": "60"}
+        )
+
+
 class IngestUrlRequest(BaseModel):
     kb_id: str
     url: str
